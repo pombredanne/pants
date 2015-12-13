@@ -2,22 +2,18 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-import unittest2 as unittest
+import unittest
 
 import antlr3
 import antlr3.tree
+
 from pants.backend.python.test.Eval import Eval
 from pants.backend.python.test.ExprLexer import ExprLexer
 from pants.backend.python.test.ExprParser import ExprParser
 
-
-# We import this gratuitously, just to test that namespace packages work correctly in the
-# generated ANTLR code. This module shares a namespace prefix with the generated
-# ANTLR code, and so will be masked by it if namespace packages are broken.
-from pants.backend.python.python_setup import PythonSetup
 
 class AntlrBuilderTest(unittest.TestCase):
   def test_generated_parser(self):

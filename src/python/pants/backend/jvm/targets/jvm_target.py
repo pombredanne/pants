@@ -2,85 +2,129 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-import six
+from twitter.common.collections import OrderedSet
 
-from pants.backend.core.targets.resources import Resources
+from pants.backend.jvm.subsystems.jvm_platform import JvmPlatform
 from pants.backend.jvm.targets.exclude import Exclude
-from pants.base.address import SyntheticAddress
-from pants.base.payload import Payload
-from pants.base.payload_field import (ConfigurationsField,
-                                      ExcludesField,
-                                      SourcesField)
-from pants.base.target import Target
 from pants.backend.jvm.targets.jar_library import JarLibrary
 from pants.backend.jvm.targets.jarable import Jarable
+from pants.base.exceptions import TargetDefinitionException
+from pants.base.payload import Payload
+from pants.base.payload_field import ExcludesField, PrimitiveField
+from pants.build_graph.resources import Resources
+from pants.build_graph.target import Target
+from pants.util.memo import memoized_property
 
 
 class JvmTarget(Target, Jarable):
   """A base class for all java module targets that provides path and dependency translation."""
 
-  class WrongTargetTypeError(Exception):
-    """Thrown if the wrong type of target is encountered.
-    """
-
-  class ExpectedAddressError(Exception):
-    """Thrown if an object that is not an address.
-    """
+  @classmethod
+  def subsystems(cls):
+    return super(JvmTarget, cls).subsystems() + (JvmPlatform,)
 
   def __init__(self,
                address=None,
                payload=None,
-               sources_rel_path=None,
                sources=None,
                provides=None,
                excludes=None,
                resources=None,
-               configurations=None,
-               no_cache=False,
+               services=None,
+               platform=None,
+               strict_deps=None,
+               fatal_warnings=None,
                **kwargs):
     """
-    :param configurations: One or more ivy configurations to resolve for this target.
-      This parameter is not intended for general use.
-    :type configurations: tuple of strings
     :param excludes: List of `exclude <#exclude>`_\s to filter this target's
       transitive dependencies against.
     :param sources: Source code files to build. Paths are relative to the BUILD
-       file's directory.
+      file's directory.
     :type sources: ``Fileset`` (from globs or rglobs) or list of strings
-    :param no_cache: If True, this should not be stored in the artifact cache
+    :param services: A dict mapping service interface names to the classes owned by this target
+                     that implement them.  Keys are fully qualified service class names, values are
+                     lists of strings, each string the fully qualified class name of a class owned
+                     by this target that implements the service interface and should be
+                     discoverable by the jvm service provider discovery mechanism described here:
+                     https://docs.oracle.com/javase/6/docs/api/java/util/ServiceLoader.html
+    :param platform: The name of the platform (defined under the jvm-platform subsystem) to use
+      for compilation (that is, a key into the --jvm-platform-platforms dictionary). If unspecified,
+      the platform will default to the first one of these that exist: (1) the default_platform
+      specified for jvm-platform, (2) a platform constructed from whatever java version is returned
+      by DistributionLocator.cached().version.
+    :type platform: str
+    :param strict_deps: When True, only the directly declared deps of the target will be used at
+      compilation time. This enforces that all direct deps of the target are declared, and can
+      improve compilation speed due to smaller classpaths. Transitive deps are always provided
+      at runtime.
+    :type strict_deps: bool
+    :param fatal_warnings: Whether to turn warnings into errors for this target.  If present,
+                           takes priority over the language's fatal-warnings option.
+    :type fatal_warnings: bool
     """
-    if sources_rel_path is None:
-      sources_rel_path = address.spec_path
+    self.address = address  # Set in case a TargetDefinitionException is thrown early
     payload = payload or Payload()
+    excludes = ExcludesField(self.assert_list(excludes, expected_type=Exclude, key_arg='excludes'))
+
     payload.add_fields({
-      'sources': SourcesField(sources=self.assert_list(sources),
-                              sources_rel_path=sources_rel_path),
+      'sources': self.create_sources_field(sources, address.spec_path, key_arg='sources'),
       'provides': provides,
-      'excludes': ExcludesField(self.assert_list(excludes, expected_type=Exclude)),
-      'configurations': ConfigurationsField(self.assert_list(configurations)),
+      'excludes': excludes,
+      'platform': PrimitiveField(platform),
+      'strict_deps': PrimitiveField(strict_deps),
+      'fatal_warnings': PrimitiveField(fatal_warnings),
     })
-    self._resource_specs = self.assert_list(resources)
+    self._resource_specs = self.assert_list(resources, key_arg='resources')
 
-    super(JvmTarget, self).__init__(address=address, payload=payload, **kwargs)
+    super(JvmTarget, self).__init__(address=address, payload=payload,
+                                    **kwargs)
+
+    # Service info is only used when generating resources, it should not affect, for example, a
+    # compile fingerprint or javadoc fingerprint.  As such, its not a payload field.
+    self._services = services or {}
+
     self.add_labels('jvm')
-    if no_cache:
-      self.add_labels('no_cache')
 
-  _jar_dependencies = None
   @property
+  def strict_deps(self):
+    """If set, whether to limit compile time deps to those that are directly declared.
+
+    :return: See constructor.
+    :rtype: bool or None
+    """
+    return self.payload.strict_deps
+
+  @property
+  def fatal_warnings(self):
+    """If set, overrides the platform's default fatal_warnings setting.
+
+    :return: See constructor.
+    :rtype: bool or None
+    """
+    return self.payload.fatal_warnings
+
+  @property
+  def platform(self):
+    """Platform associated with this target.
+
+    :return: The jvm platform object.
+    :rtype: JvmPlatformSettings
+    """
+    return JvmPlatform.global_instance().get_platform_for_target(self)
+
+  @memoized_property
   def jar_dependencies(self):
-    if self._jar_dependencies is None:
-      self._jar_dependencies = set(self.get_jar_dependencies())
-    return self._jar_dependencies
+    return OrderedSet(self.get_jar_dependencies())
 
   def mark_extra_invalidation_hash_dirty(self):
-    self._jar_dependencies = None
+    del self.jar_dependencies
 
   def get_jar_dependencies(self):
-    jar_deps = set()
+    jar_deps = OrderedSet()
+
     def collect_jar_deps(target):
       if isinstance(target, JarLibrary):
         jar_deps.update(target.payload.jars)
@@ -94,7 +138,7 @@ class JvmTarget(Target, Jarable):
 
   @property
   def traversable_dependency_specs(self):
-    for spec in super(JvmTarget, self).traversable_specs:
+    for spec in super(JvmTarget, self).traversable_dependency_specs:
       yield spec
     for resource_spec in self._resource_specs:
       yield resource_spec
@@ -114,33 +158,6 @@ class JvmTarget(Target, Jarable):
   def excludes(self):
     return self.payload.excludes
 
-  def to_jar_dependencies(self, jar_library_specs):
-    """Convenience method to resolve a list of specs to JarLibraries and return its jars attributes.
-
-    Expects that the jar_libraries are declared relative to this target.
-
-    :param Address relative_to: Address that references library_specs, for error messages
-    :param library_specs: string specs to JavaLibrary targets. Note, this list should be returned
-      by the caller's traversable_specs() implementation to make sure that the jar_dependency jars
-      have been added to the build graph.
-    :param build_graph: build graph instance used to search for specs
-    :return: list of JarDependency instances represented by the library_specs
-    """
-    jar_deps = set()
-    for spec in jar_library_specs:
-      if not isinstance(spec, six.string_types):
-        raise self.ExpectedAddressError(
-          "{address}: expected imports to contain string addresses, got {found_class}."
-          .format(address=self.address.spec,
-                  found_class=type(spec).__name__))
-      address = SyntheticAddress.parse(spec, relative_to=self.address.spec_path)
-      target = self._build_graph.get_target(address)
-      if isinstance(target, JarLibrary):
-        jar_deps.update(target.jar_dependencies)
-      else:
-        raise self.WrongTargetTypeError(
-          "{address}: expected {spec} to be jar_library target type, got {found_class}"
-          .format(address=self.address.spec,
-                  spec=address.spec,
-                  found_class=type(target).__name__))
-    return list(jar_deps)
+  @property
+  def services(self):
+    return self._services

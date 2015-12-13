@@ -2,8 +2,8 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import re
 from itertools import izip_longest
@@ -59,7 +59,7 @@ class Revision(object):
       components.extend(parse_components(build))
       return cls(*components)
     except ValueError:
-      raise cls.BadRevision("Failed to parse '%s' as a semantic version number" % rev)
+      raise cls.BadRevision("Failed to parse '{}' as a semantic version number".format(rev))
 
   @classmethod
   def lenient(cls, rev):
@@ -86,4 +86,16 @@ class Revision(object):
     return 0
 
   def __repr__(self):
-    return '%s(%s)' % (self.__class__.__name__, ', '.join(map(repr, self._components)))
+    return '{}({})'.format(self.__class__.__name__, ', '.join(map(repr, self._components)))
+
+  def __eq__(self, other):
+    return hasattr(other, '_components') and tuple(self._components) == tuple(other._components)
+
+  def __ne__(self, other):
+    return not self.__eq__(other)
+
+  def __hash__(self):
+    return hash(self._components)
+
+  def __str__(self):
+    return '.'.join(str(c) for c in self._components)

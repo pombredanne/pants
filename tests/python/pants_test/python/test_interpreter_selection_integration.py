@@ -2,13 +2,11 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import os
 import subprocess
-
-import pytest
 
 from pants.util.contextutil import temporary_dir
 from pants_test.pants_run_integration_test import PantsRunIntegrationTest
@@ -36,7 +34,7 @@ class InterpreterSelectionIntegrationTest(PantsRunIntegrationTest):
       self.assertEquals(version, '%s.%s' % (v[0], v[1]))
     else:
       print('No python %s found. Skipping.' % version)
-      pytest.skip('No python %s on system' % version)
+      self.skipTest('No python %s on system' % version)
 
   def _echo_version(self, version):
     with temporary_dir() as distdir:
@@ -58,9 +56,8 @@ class InterpreterSelectionIntegrationTest(PantsRunIntegrationTest):
 
   def _build_pex(self, binary_target, config=None):
     # Avoid some known-to-choke-on interpreters.
-    command = ['goal', 'binary', binary_target,
+    command = ['binary',
+               binary_target,
                '--interpreter=CPython>=2.6,<3',
                '--interpreter=CPython>=3.3']
     return self.run_pants(command=command, config=config)
-
-

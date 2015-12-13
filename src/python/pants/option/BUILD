@@ -2,22 +2,23 @@
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 python_library(
-  name = 'option',
-  sources = globs('*.py') - ['migrate_config.py'],
-  dependencies = [
+  name='option',
+  sources=globs('*.py'),
+  dependencies=[
+    '3rdparty/python:ansicolors',
+    '3rdparty/python:six',
     '3rdparty/python/twitter/commons:twitter.common.collections',
     'src/python/pants/base:build_environment',
-    'src/python/pants/base:config',
-    'src/python/pants/goal',
+    'src/python/pants/base:deprecated',
+    'src/python/pants/util:eval',
+    'src/python/pants/util:meta',
+    'src/python/pants/util:strutil',
   ]
 )
 
-python_binary(
-  name= 'migrate_config',
-  source = 'migrate_config.py',
-  dependencies = [
-    ':option',
-    '3rdparty/python:ansicolors',
-    'src/python/pants/base:config',
+target(
+  name='migrate_config',
+  dependencies=[
+    'migrations/options/src/python:migrate_config'
   ]
 )

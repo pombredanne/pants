@@ -9,12 +9,10 @@ necessarily to develop Pants itself, see
 IntelliJ Setup
 --------------
 
-As pants is a python application, the "Ultimate" (aka paid-for) edition
-of IntelliJ is required, as is the Python plugin. You'll need to:
+Set up IntelliJ for Python (if you haven't already):
 
--   Download "IntelliJ IDEA Ultimate Edition" from
-    <http://www.jetbrains.com/>.
--   Within IntelliJ, install the Python plugin.
+- Download "IntelliJ IDEA Community Edition" from <http://www.jetbrains.com/>.
+- Within IntelliJ, install the *Python Community Edition* plugin.
 
 Project Setup
 -------------
@@ -29,7 +27,7 @@ the way you want to run pants when iterating and it also prepares a
 virtual environment suitable for IDEs:
 
     :::bash
-    $ PANTS_DEV=1 ./pants
+    $ ./pants
 
 Next open IntelliJ and select "Create New Project".
 
@@ -46,11 +44,7 @@ SDK".
 ![image](images/intellij-new-pythonsdk.png)
 
 This will be a "local" interpreter and you'll need to select the virtual
-environment bootstrapped above; it's in
-`build-support/pants_dev_deps.venv` (not
-`build-support/pants_deps.venv`). This is **important** because the dev
-virtual environment is designed to have 3rdparty dependencies that IDEs
-can handle.
+environment bootstrapped above; it's in `build-support/pants_dev_deps.venv`.
 
 ![image](images/intellij-select-venv.png)
 
@@ -98,7 +92,7 @@ Open the "Run -\> Edit Configurations..." dialog box.
     `src/python/pants/bin/pants_exe.py` file (example:
     `/home/jsirois/dev-pants/src/python/pants/bin/pants_exe.py`)
 -   Set the "Script parameters" to your pants command-line args, such as
-    goal goals.
+    goals.
 -   Set the "Working directory" to where you want to run pants from.
     Note this could be an entirely different repo from where the pants
     source code lives. This is very useful for making a pants change and

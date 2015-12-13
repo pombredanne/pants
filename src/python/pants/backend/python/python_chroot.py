@@ -2,41 +2,41 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from collections import defaultdict
+import functools
 import logging
 import os
 import shutil
 import sys
-import tempfile
+from collections import defaultdict
 
-from pex.interpreter import PythonInterpreter
-from pex.pex_builder import PEXBuilder
+from pex.fetcher import Fetcher
+from pex.pex import PEX
 from pex.platforms import Platform
+from pex.resolver import resolve
 from twitter.common.collections import OrderedSet
 
 from pants.backend.codegen.targets.python_antlr_library import PythonAntlrLibrary
 from pants.backend.codegen.targets.python_thrift_library import PythonThriftLibrary
-from pants.backend.core.targets.dependencies import Dependencies
-from pants.backend.core.targets.prep_command import PrepCommand
 from pants.backend.python.antlr_builder import PythonAntlrBuilder
 from pants.backend.python.python_requirement import PythonRequirement
-from pants.backend.python.python_setup import PythonSetup
-from pants.backend.python.resolver import resolve_multi
 from pants.backend.python.targets.python_binary import PythonBinary
 from pants.backend.python.targets.python_library import PythonLibrary
 from pants.backend.python.targets.python_requirement_library import PythonRequirementLibrary
 from pants.backend.python.targets.python_tests import PythonTests
 from pants.backend.python.thrift_builder import PythonThriftBuilder
 from pants.base.build_environment import get_buildroot
-from pants.base.build_invalidator import BuildInvalidator, CacheKeyGenerator
-from pants.base.config import Config
-from pants.util.dirutil import safe_mkdir, safe_rmtree
+from pants.build_graph.prep_command import PrepCommand
+from pants.build_graph.resources import Resources
+from pants.build_graph.target import Target
+from pants.invalidation.build_invalidator import BuildInvalidator, CacheKeyGenerator
+from pants.util.dirutil import safe_mkdir, safe_mkdtemp, safe_rmtree
 
 
 logger = logging.getLogger(__name__)
+
 
 class PythonChroot(object):
   _VALID_DEPENDENCIES = {
@@ -46,68 +46,78 @@ class PythonChroot(object):
     PythonBinary: 'binaries',
     PythonThriftLibrary: 'thrifts',
     PythonAntlrLibrary: 'antlrs',
-    PythonTests: 'tests'
+    PythonTests: 'tests',
+    Resources: 'resources'
   }
-
-  MEMOIZED_THRIFTS = {}
 
   class InvalidDependencyException(Exception):
     def __init__(self, target):
-      Exception.__init__(self, "Not a valid Python dependency! Found: %s" % target)
+      super(PythonChroot.InvalidDependencyException, self).__init__(
+        'Not a valid Python dependency! Found: {}'.format(target))
+
+  @staticmethod
+  def get_platforms(platform_list):
+    return tuple({Platform.current() if p == 'current' else p for p in platform_list})
 
   def __init__(self,
+               python_setup,
+               python_repos,
+               ivy_bootstrapper,
+               thrift_binary_factory,
+               interpreter,
+               builder,
                targets,
+               platforms,
                extra_requirements=None,
-               builder=None,
-               platforms=None,
-               interpreter=None):
-    self._config = Config.from_cache()
+               log=None):
+    self._python_setup = python_setup
+    self._python_repos = python_repos
+    self._ivy_bootstrapper = ivy_bootstrapper
+    self._thrift_binary_factory = thrift_binary_factory
+
+    self._interpreter = interpreter
+    self._builder = builder
     self._targets = targets
-    self._extra_requirements = list(extra_requirements) if extra_requirements else []
     self._platforms = platforms
-    self._interpreter = interpreter or PythonInterpreter.get()
-    self._builder = builder or PEXBuilder(os.path.realpath(tempfile.mkdtemp()),
-                                          interpreter=self._interpreter)
+    self._extra_requirements = list(extra_requirements) if extra_requirements else []
+    self._logger = log or logger
 
     # Note: unrelated to the general pants artifact cache.
-    self._egg_cache_root = os.path.join(
-        PythonSetup(self._config).scratch_dir('artifact_cache', default_name='artifacts'),
-        str(self._interpreter.identity))
-
+    self._artifact_cache_root = os.path.join(
+      self._python_setup.artifact_cache_dir, str(self._interpreter.identity))
     self._key_generator = CacheKeyGenerator()
-    self._build_invalidator = BuildInvalidator( self._egg_cache_root)
+    self._build_invalidator = BuildInvalidator(self._artifact_cache_root)
 
   def delete(self):
     """Deletes this chroot from disk if it has been dumped."""
     safe_rmtree(self.path())
 
-  def __del__(self):
-    if os.getenv('PANTS_LEAVE_CHROOT') is None:
-      self.delete()
-    else:
-      self.debug('Left chroot at %s' % self.path())
-
-  @property
-  def builder(self):
-    return self._builder
-
-  def debug(self, msg, indent=0):
-    if os.getenv('PANTS_VERBOSE') is not None:
-      print('%s%s' % (' ' * indent, msg))
+  def debug(self, msg):
+    self._logger.debug(msg)
 
   def path(self):
     return os.path.realpath(self._builder.path())
+
+  def pex(self):
+    return PEX(self.path(), interpreter=self._interpreter)
+
+  def package_pex(self, filename):
+    """Package into a PEX zipfile.
+
+    :param filename: The filename where the PEX should be stored.
+    """
+    self._builder.build(filename)
 
   def _dump_library(self, library):
     def copy_to_chroot(base, path, add_function):
       src = os.path.join(get_buildroot(), base, path)
       add_function(src, path)
 
-    self.debug('  Dumping library: %s' % library)
+    self.debug('  Dumping library: {}'.format(library))
     for relpath in library.sources_relative_to_source_root():
       try:
         copy_to_chroot(library.target_base, relpath, self._builder.add_source)
-      except OSError as e:
+      except OSError:
         logger.error("Failed to copy {path} for library {library}"
                      .format(path=os.path.join(library.target_base, relpath),
                              library=library))
@@ -118,7 +128,7 @@ class PythonChroot(object):
         try:
           copy_to_chroot(resources_tgt.target_base, resource_file_from_source_root,
                          self._builder.add_resource)
-        except OSError as e:
+        except OSError:
           logger.error("Failed to copy {path} for resource {resource}"
                        .format(path=os.path.join(resources_tgt.target_base,
                                                  resource_file_from_source_root),
@@ -126,18 +136,20 @@ class PythonChroot(object):
           raise
 
   def _dump_requirement(self, req):
-    self.debug('  Dumping requirement: %s' % req)
+    self.debug('  Dumping requirement: {}'.format(req))
     self._builder.add_requirement(req)
 
   def _dump_distribution(self, dist):
-    self.debug('  Dumping distribution: .../%s' % os.path.basename(dist.location))
+    self.debug('  Dumping distribution: .../{}'.format(os.path.basename(dist.location)))
     self._builder.add_distribution(dist)
 
   def _generate_requirement(self, library, builder_cls):
     library_key = self._key_generator.key_for_target(library)
-    builder = builder_cls(library, get_buildroot(), self._config, '-' + library_key.hash[:8])
+    builder = builder_cls(target=library,
+                          root_dir=get_buildroot(),
+                          target_suffix='-' + library_key.hash[:8])
 
-    cache_dir = os.path.join(self._egg_cache_root, library_key.id)
+    cache_dir = os.path.join(self._artifact_cache_root, library_key.id)
     if self._build_invalidator.needs_update(library_key):
       sdist = builder.build(interpreter=self._interpreter)
       safe_mkdir(cache_dir)
@@ -147,19 +159,32 @@ class PythonChroot(object):
     return PythonRequirement(builder.requirement_string(), repository=cache_dir, use_2to3=True)
 
   def _generate_thrift_requirement(self, library):
-    return self._generate_requirement(library, PythonThriftBuilder)
+    thrift_builder = functools.partial(PythonThriftBuilder,
+                                       thrift_binary_factory=self._thrift_binary_factory,
+                                       workdir=safe_mkdtemp(dir=self.path(), prefix='thrift.'))
+    return self._generate_requirement(library, thrift_builder)
 
   def _generate_antlr_requirement(self, library):
-    return self._generate_requirement(library, PythonAntlrBuilder)
+    antlr_builder = functools.partial(PythonAntlrBuilder,
+                                      ivy_bootstrapper=self._ivy_bootstrapper,
+                                      workdir=safe_mkdtemp(dir=self.path(), prefix='antlr.'))
+    return self._generate_requirement(library, antlr_builder)
 
   def resolve(self, targets):
     children = defaultdict(OrderedSet)
+
     def add_dep(trg):
+      # Currently we handle all of our code generation, so we don't want to operate over any
+      # synthetic targets injected upstream.
+      # TODO(John Sirois): Revisit this when building a proper python product pipeline.
+      if trg.is_synthetic:
+        return
+
       for target_type, target_key in self._VALID_DEPENDENCIES.items():
         if isinstance(trg, target_type):
           children[target_key].add(trg)
           return
-        elif isinstance(trg, Dependencies):
+        elif type(trg) == Target:
           return
       raise self.InvalidDependencyException(trg)
     for target in targets:
@@ -167,7 +192,7 @@ class PythonChroot(object):
     return children
 
   def dump(self):
-    self.debug('Building chroot for %s:' % self._targets)
+    self.debug('Building chroot for {}:'.format(self._targets))
     targets = self.resolve(self._targets)
 
     for lib in targets['libraries'] | targets['binaries']:
@@ -175,11 +200,8 @@ class PythonChroot(object):
 
     generated_reqs = OrderedSet()
     if targets['thrifts']:
-      for thr in set(targets['thrifts']):
-        if thr not in self.MEMOIZED_THRIFTS:
-          self.MEMOIZED_THRIFTS[thr] = self._generate_thrift_requirement(thr)
-        generated_reqs.add(self.MEMOIZED_THRIFTS[thr])
-
+      for thr in targets['thrifts']:
+        generated_reqs.add(self._generate_thrift_requirement(thr))
       generated_reqs.add(PythonRequirement('thrift', use_2to3=True))
 
     for antlr in targets['antlrs']:
@@ -191,23 +213,18 @@ class PythonChroot(object):
         reqs_from_libraries.add(req)
 
     reqs_to_build = OrderedSet()
-    find_links = []
+    find_links = OrderedSet()
 
     for req in reqs_from_libraries | generated_reqs | self._extra_requirements:
       if not req.should_build(self._interpreter.python, Platform.current()):
-        self.debug('Skipping %s based upon version filter' % req)
+        self.debug('Skipping {} based upon version filter'.format(req))
         continue
       reqs_to_build.add(req)
       self._dump_requirement(req.requirement)
       if req.repository:
-        find_links.append(req.repository)
+        find_links.add(req.repository)
 
-    distributions = resolve_multi(
-         self._config,
-         reqs_to_build,
-         interpreter=self._interpreter,
-         platforms=self._platforms,
-         find_links=find_links)
+    distributions = self._resolve_multi(reqs_to_build, find_links)
 
     locations = set()
     for platform, dist_set in distributions.items():
@@ -220,3 +237,32 @@ class PythonChroot(object):
       print('WARNING: Target has multiple python_binary targets!', file=sys.stderr)
 
     return self._builder
+
+  def _resolve_multi(self, requirements, find_links):
+    """Multi-platform dependency resolution for PEX files.
+
+       Given a pants configuration and a set of requirements, return a list of distributions
+       that must be included in order to satisfy them.  That may involve distributions for
+       multiple platforms.
+
+       :param requirements: A list of :class:`PythonRequirement` objects to resolve.
+       :param find_links: Additional paths to search for source packages during resolution.
+    """
+    distributions = dict()
+    platforms = self.get_platforms(self._platforms or self._python_setup.platforms)
+    fetchers = self._python_repos.get_fetchers()
+    fetchers.extend(Fetcher([path]) for path in find_links)
+    context = self._python_repos.get_network_context()
+
+    for platform in platforms:
+      requirements_cache_dir = os.path.join(self._python_setup.resolver_cache_dir, str(self._interpreter.identity))
+      distributions[platform] = resolve(
+        requirements=[req.requirement for req in requirements],
+        interpreter=self._interpreter,
+        fetchers=fetchers,
+        platform=platform,
+        context=context,
+        cache=requirements_cache_dir,
+        cache_ttl=self._python_setup.resolver_cache_ttl)
+
+    return distributions

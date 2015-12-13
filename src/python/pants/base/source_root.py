@@ -2,16 +2,19 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import os
 
 from twitter.common.collections import OrderedSet
 
 from pants.base.build_environment import get_buildroot
+from pants.base.build_file_target_factory import BuildFileTargetFactory
 from pants.base.build_manual import manual
+from pants.base.deprecated import deprecated
 from pants.base.exceptions import TargetDefinitionException
+from pants.source.source_root import SourceRootConfig
 
 
 class SourceRootTree(object):
@@ -25,7 +28,6 @@ class SourceRootTree(object):
 
   class NestedSourceRootError(Exception):
     pass
-
 
   class Node(object):
     """Node in the tree that represents a directory"""
@@ -54,6 +56,10 @@ class SourceRootTree(object):
     def __eq__(self, other):
       return self.key == other.key
 
+  @staticmethod
+  def _dir_list(path):
+    normpath = os.path.normpath(path)
+    return [] if normpath == '.' else normpath.split(os.path.sep)
 
   def __init__(self):
     self._root = self.Node(key="ROOT")
@@ -66,8 +72,7 @@ class SourceRootTree(object):
     :type types: set of classes derived from Target
     """
     curr_node = self._root
-    dir_list = os.path.normpath(source_root).split(os.path.sep)
-    for subdir in dir_list:
+    for subdir in self._dir_list(source_root):
       curr_node = curr_node.get_or_add(subdir)
 
     if curr_node.is_leaf and types != curr_node.types:
@@ -92,8 +97,7 @@ class SourceRootTree(object):
     """
     found = curr_node = self._root
     found_path = []
-    dir_list = os.path.normpath(path).split(os.path.sep)
-    for subdir in dir_list:
+    for subdir in self._dir_list(path):
       curr_node = curr_node.get(subdir)
       if not curr_node:
         break
@@ -184,18 +188,28 @@ class SourceRoot(object):
     self.rel_path = rel_path
 
   def __call__(self, basedir, *allowed_target_types):
-    allowed_target_types = [proxy._addressable_type.get_target_type()
-                            for proxy in allowed_target_types]
-    SourceRoot.register(os.path.join(self.rel_path, basedir), *allowed_target_types)
+    self._register_target_type_factories(os.path.join(self.rel_path, basedir),
+                                         *allowed_target_types)
 
   def here(self, *allowed_target_types):
     """Registers the cwd as a source root for the given target types.
 
-    :param allowed_target_types: instances of AddressableCallProxy to register for this BUILD file.
+    :param allowed_target_types: Type factories to register for this BUILD file.
     """
-    allowed_target_types = [proxy._addressable_type.get_target_type()
-                            for proxy in allowed_target_types]
-    SourceRoot.register(self.rel_path, *allowed_target_types)
+    self._register_target_type_factories(self.rel_path, *allowed_target_types)
+
+  def _register_target_type_factories(self, basedir, *target_type_factories):
+    invalid_target_type_factories = [f for f in target_type_factories
+                                     if not isinstance(f, BuildFileTargetFactory)]
+    if invalid_target_type_factories:
+      raise ValueError('The following are not valid target types for registering against the '
+                       'source root at {}:\n\t{}'
+                       .format(basedir, '\n\t'.join(map(str, invalid_target_type_factories))))
+
+    allowed_target_types = set()
+    for target_type_factory in target_type_factories:
+      allowed_target_types.update(target_type_factory.target_types)
+    self.register(basedir, *tuple(allowed_target_types))
 
   @classmethod
   def reset(cls):
@@ -204,48 +218,6 @@ class SourceRoot(object):
     cls._TYPES_BY_ROOT = {}
     cls._SEARCHED = set()
     cls._SOURCE_ROOT_TREE = SourceRootTree()
-
-  @classmethod
-  def find(cls, target):
-    """Finds the source root for the given target.
-
-    :param Target target: the target whose source_root you are querying.
-    :returns: the source root that is a prefix of the target, or the parent directory of the
-    target's BUILD file if none is registered.
-    """
-    target_path = target.address.spec_path
-    found_source_root, allowed_types = cls._SOURCE_ROOT_TREE.get_root_and_types(target_path)
-    if not found_source_root:
-      # If the source root is not registered, use the path from the spec.
-      found_source_root = target_path
-
-    if allowed_types and not isinstance(target, allowed_types):
-      # TODO: Find a way to use the BUILD file aliases in the error message, instead
-      # of target.__class__.__name__. E.g., java_tests instead of JavaTests.
-      raise TargetDefinitionException(target,
-                                      'Target type {target_type} not allowed under {source_root}'
-                                      .format(target_type=target.__class__.__name__,
-                                              source_root=found_source_root))
-    return found_source_root
-
-  @classmethod
-  def find_by_path(cls, path):
-    """Finds a registered source root for a given path
-
-    :param string path: a path containing sources to query
-    :returns: the source_root that has been registered as a prefix of the specified path, or None if
-    no matching source root was registered.
-    """
-    found_source_root, _ = cls._SOURCE_ROOT_TREE.get_root_and_types(path)
-    return found_source_root
-
-  @classmethod
-  def find_siblings_by_path(cls, path):
-    """
-    :param path: path containing source
-    :return: all source root siblings for this path
-    """
-    return cls._SOURCE_ROOT_TREE.get_root_siblings(path)
 
   @classmethod
   def types(cls, root):
@@ -283,6 +255,18 @@ class SourceRoot(object):
     cls._register(basedir, True, *allowed_target_types)
 
   @classmethod
+  def _relative_to_buildroot(cls, path):
+    # Verify that source_root_dir doesn't reach outside buildroot.
+    buildroot = os.path.normpath(get_buildroot())
+    if path.startswith(buildroot):
+      abspath = os.path.normpath(path)
+    else:
+      abspath = os.path.normpath(os.path.join(buildroot, path))
+    if not abspath.startswith(buildroot):
+      raise ValueError('Source root {} is not under the build root {}'.format(abspath, buildroot))
+    return os.path.relpath(abspath, buildroot)
+
+  @classmethod
   def _register(cls, source_root_dir, mutable, *allowed_target_types):
     """Registers a source root.
 
@@ -291,15 +275,10 @@ class SourceRoot(object):
     :param list allowed_target_types: Optional list of target types. If specified, we enforce that
                           only targets of those types appear under this source root.
     """
-    # Verify that source_root_dir doesn't reach outside buildroot.
-    buildroot = os.path.normpath(get_buildroot())
-    if source_root_dir.startswith(buildroot):
-      abspath = os.path.normpath(source_root_dir)
-    else:
-      abspath = os.path.normpath(os.path.join(buildroot, source_root_dir))
-    if not abspath.startswith(buildroot):
-      raise ValueError('Source root %s is not under the build root %s' % (abspath, buildroot))
-    source_root_dir = os.path.relpath(abspath, buildroot)
+    # Temporary delegation to the new implementation, until this entire file goes away.
+    SourceRootConfig.global_instance().get_source_roots().add_source_root(source_root_dir)
+
+    source_root_dir = SourceRoot._relative_to_buildroot(source_root_dir)
 
     types = cls._TYPES_BY_ROOT.get(source_root_dir)
     if types is None:
@@ -319,4 +298,3 @@ class SourceRoot(object):
   @classmethod
   def _dump(cls):
     return cls._SOURCE_ROOT_TREE._dump()
-

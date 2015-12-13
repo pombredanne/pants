@@ -15,7 +15,8 @@ function usage() {
   echo " -h           print out this help message"
   echo " -o           open the doc site locally"
   echo " -p           publish the doc site remotely"
-  echo " -d           publish the site to a subdir at this path (useful for public previews)"
+  echo " -y           continue publishing without prompting"
+  echo " -d  <dir>    publish the site to a subdir staging/<dir> (useful for public previews)"
 
   if (( $# > 0 )); then
     die "$@"
@@ -26,18 +27,19 @@ function usage() {
 
 publish_path=""
 
-while getopts "hopd:" opt; do
+while getopts "hopyd:" opt; do
   case ${opt} in
     h) usage ;;
     o) preview="true" ;;
     p) publish="true" ;;
-    d) publish_path="${OPTARG}" ;;
+    y) publish_confirmed="true" ;;
+    d) publish_path="staging/${OPTARG}" ;;
     *) usage "Invalid option: -${OPTARG}" ;;
   esac
 done
 
-${PANTS_EXE} goal builddict --print-exception-stacktrace || \
-  die "Failed to generate the 'BUILD Dictionary' and/or 'Goals Reference'."
+${PANTS_EXE} builddict --omit-impl-re='internal_backend.*' || \
+  die "Failed to generate the 'BUILD Dictionary' and/or 'Options Reference'."
 
 function do_open() {
   if [[ "${preview}" = "true" ]]; then
@@ -52,22 +54,23 @@ function do_open() {
 }
 
 # generate html from markdown pages.
-${PANTS_EXE} goal markdown --print-exception-stacktrace \
-  --markdown-fragment src:: examples:: src/docs:: //:readme \
-  testprojects/src/java/com/pants/testproject/page:readme || \
-  die "Failed to generate HTML from markdown'."
+${PANTS_EXE} markdown --fragment \
+  src:: examples:: src/docs:: //:readme \
+  testprojects/src/java/org/pantsbuild/testproject/page:readme || \
+    die "Failed to generate HTML from markdown'."
 
 # invoke doc site generator.
-${PANTS_EXE} goal sitegen --print-exception-stacktrace \
-  --sitegen-config-path=src/python/pants/docs/docsite.json || \
+${PANTS_EXE} sitegen --config-path=src/python/pants/docs/docsite.json || \
   die "Failed to generate doc site'."
 
 do_open "${REPO_ROOT}/dist/docsite/index.html"
 
 if [[ "${publish}" = "true" ]]; then
   url="http://pantsbuild.github.io/${publish_path}"
-  read -ep "To abort publishing these docs to ${url} press CTRL-C, otherwise press enter to \
+  if [[ "${publish_confirmed}" != "true" ]] ; then
+    read -ep "To abort publishing these docs to ${url} press CTRL-C, otherwise press enter to \
 continue."
+  fi
   (
     ${REPO_ROOT}/src/python/pants/docs/publish_via_git.sh \
       git@github.com:pantsbuild/pantsbuild.github.io.git \

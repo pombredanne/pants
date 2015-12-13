@@ -2,12 +2,13 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import logging
 import os
 import sys
+
 
 # Note throughout the distinction between the artifact_root (which is where the artifacts are
 # originally built and where the cache restores them to) and the cache root path/URL (which is
@@ -15,11 +16,14 @@ import sys
 
 logger = logging.getLogger(__name__)
 
+
 class ArtifactCacheError(Exception):
   pass
 
+
 class NonfatalArtifactCacheError(Exception):
   pass
+
 
 class UnreadableArtifact(object):
   """A False-y value to indicate a read-failure (vs a normal cache-miss)
@@ -33,7 +37,7 @@ class UnreadableArtifact(object):
     :param err: Any additional information on the nature of the read error.
     """
     self.key = key
-    self.err = None
+    self.err = err
 
   # For python 3
   def __bool__(self):
@@ -42,6 +46,9 @@ class UnreadableArtifact(object):
   # For python 2
   def __nonzero__(self):
     return self.__bool__()
+
+  def __str__(self):
+    return "key={} err={}".format(self.key, self.err)
 
 
 class ArtifactCache(object):
@@ -59,6 +66,14 @@ class ArtifactCache(object):
     All artifacts must be under artifact_root.
     """
     self.artifact_root = artifact_root
+
+  def prune(self):
+    """Prune stale cache files
+
+    Remove old unused cache files
+    :return:
+    """
+    pass
 
   def insert(self, cache_key, paths, overwrite=False):
     """Cache the output of a build.
@@ -78,14 +93,14 @@ class ArtifactCache(object):
 
     if not overwrite:
       if self.has(cache_key):
-        logger.debug('Skipping insert of existing artifact: ', cache_key)
+        logger.debug('Skipping insert of existing artifact: {0}'.format(cache_key))
         return False
 
     try:
       self.try_insert(cache_key, paths)
       return True
     except NonfatalArtifactCacheError as e:
-      logger.error('Error while writing to artifact cache: {0}. '.format(e))
+      logger.error('Error while writing to artifact cache: {0}'.format(e))
       return False
 
   def try_insert(self, cache_key, paths):
@@ -99,7 +114,7 @@ class ArtifactCache(object):
   def has(self, cache_key):
     pass
 
-  def use_cached_files(self, cache_key):
+  def use_cached_files(self, cache_key, results_dir=None):
     """Use the files cached for the given key.
 
     Returned result indicates whether or not an artifact was successfully found
@@ -109,7 +124,7 @@ class ArtifactCache(object):
 
     Implementations may choose to return an UnreadableArtifact instance instead
     of `False` to indicate an artifact was in the cache but could not be read,
-    due to anerror or corruption. UnreadableArtifact evaluates as False-y, so
+    due to an error or corruption. UnreadableArtifact evaluates as False-y, so
     callers can treat the result as a boolean if they are only concerned with
     whether or not an artifact was read.
 
@@ -128,6 +143,7 @@ class ArtifactCache(object):
     """
     pass
 
+
 def call_use_cached_files(tup):
   """Importable helper for multi-proc calling of ArtifactCache.use_cached_files on a cache instance.
 
@@ -135,15 +151,21 @@ def call_use_cached_files(tup):
   To call a bound method, instead call a helper like this and pass tuple of the instance and args.
   The helper can then call the original method on the deserialized instance.
 
-  :param tup: A tuple of an ArtifactCache and arg (eg CacheKey) for ArtifactCache.use_cached_files.
+  :param tup: A tuple of an ArtifactCache and args (eg CacheKey) for ArtifactCache.use_cached_files.
   """
-  cache, key = tup
-  res = cache.use_cached_files(key)
-  if res:
-    sys.stderr.write('.')
-  else:
-    sys.stderr.write(' ')
-  return res
+
+  try:
+    cache, key, results_dir = tup
+    res = cache.use_cached_files(key, results_dir)
+    if res:
+      sys.stderr.write('.')
+    else:
+      sys.stderr.write(' ')
+    return res
+  except NonfatalArtifactCacheError as e:
+    logger.warn('Error calling use_cached_files in artifact cache: {0}'.format(e))
+    return False
+
 
 def call_insert(tup):
   """Importable helper for multi-proc calling of ArtifactCache.insert on an ArtifactCache instance.
@@ -154,6 +176,9 @@ def call_insert(tup):
               eg (some_cache_instance, cache_key, [some_file, another_file], False)
 
   """
-  cache, key, files, overwrite = tup
-  return cache.insert(key, files, overwrite)
-
+  try:
+    cache, key, files, overwrite = tup
+    return cache.insert(key, files, overwrite)
+  except NonfatalArtifactCacheError as e:
+    logger.warn('Error while inserting into artifact cache: {0}'.format(e))
+    return False

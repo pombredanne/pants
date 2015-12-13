@@ -2,27 +2,27 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 from pants.backend.core.wrapped_globs import Globs
 from pants.backend.jvm.targets.java_library import JavaLibrary
-from pants.base.build_file_aliases import BuildFileAliases
-from pants.base.exceptions import TargetDefinitionException
 from pants.base.payload import Payload, PayloadFieldAlreadyDefinedError, PayloadFrozenError
 from pants.base.payload_field import PrimitiveField
+from pants.build_graph.build_file_aliases import BuildFileAliases
 from pants_test.base_test import BaseTest
 
 
 class PayloadTest(BaseTest):
+
   @property
   def alias_groups(self):
-    return BuildFileAliases.create(
+    return BuildFileAliases(
       targets={
         'java_library': JavaLibrary,
       },
       context_aware_object_factories={
-        'globs': Globs,
+        'globs': Globs.factory,
       },
     )
 
@@ -74,17 +74,17 @@ class PayloadTest(BaseTest):
   def test_no_nested_globs(self):
     # nesting no longer allowed
     self.add_to_build_file('z/BUILD', 'java_library(name="z", sources=[globs("*")])')
-    with self.assertRaises(TargetDefinitionException):
-      self.context().scan(self.build_root)
+    with self.assertRaises(ValueError):
+      self.context().scan()
 
   def test_flat_globs_list(self):
     # flattened allowed
     self.add_to_build_file('y/BUILD', 'java_library(name="y", sources=globs("*"))')
-    self.context().scan(self.build_root)
+    self.context().scan()
 
   def test_single_source(self):
     self.add_to_build_file('y/BUILD', 'java_library(name="y", sources=["Source.scala"])')
-    self.context().scan(self.build_root)
+    self.context().scan()
 
   def test_missing_payload_field(self):
     payload = Payload()
@@ -104,4 +104,3 @@ class PayloadTest(BaseTest):
     self.assertEquals(None, payload.get_field_value('field_doesnt_exist'))
     self.assertEquals('nothing', payload.get_field('field_doesnt_exist', default='nothing'))
     self.assertEquals('nothing', payload.get_field_value('field_doesnt_exist', default='nothing'))
-

@@ -9,7 +9,7 @@ that contains some metadata -- code coverage info, source git
 repository, java version that created the jar, etc. To accomplish this,
 you'll first need to write a custom task, which creates any additional
 files (jar or otherwise) that you would like to publish. Next, you'll
-create a `publish_extras` section under `[jar-publish]` in pants.ini,
+create a `publish_extras` section under `[publish.jar]` in pants.ini,
 and add a key for the new product type. Your custom task will create the
 extra file(s) that you want to publish, and write the path to the
 products map under the key that you have defined in pants.ini. The
@@ -22,7 +22,7 @@ An example of a custom task is supplied in the
 `examples/src/python/example/pants_publish_plugin` directory. To use it,
 add the following to your pants.ini:
 
-    [jar-publish]
+    [publish.jar]
     publish_extras: {
         'extra_test_jar_example': {
           'override_name': '{target_provides_name}-extra_example',
@@ -31,8 +31,8 @@ add the following to your pants.ini:
         },
       }
 
-    [backends]
-    packages: [
+    [DEFAULT]
+    backend_packages: [
         'example.pants_publish_plugin',
       ]
 
@@ -71,13 +71,14 @@ unique name. With the above config in your pants.ini, invoke pants like
 this, to do a test publish:
 
     :::bash
-    WRAPPER_SRCPATH=examples/src/python PANTS_DEV=1 ./pants goal publish examples/src/java/com/pants/examples/hello/greet --no-dryrun --local=~/tmp
+    WRAPPER_SRCPATH=examples/src/python ./pants publish.jar --no-dryrun --local=~/tmp \
+      examples/src/java/org/pantsbuild/example/hello/greet
 
 Now if you examine the `/tmp` directory, you'll notice that an extra jar
 has been published for the `greet` target:
 
     :::bash
-    $ ls -1 /tmp/com/pants/examples/hello-greet/0.0.1-SNAPSHOT/|grep example
+    $ ls -1 /tmp/org/pantsbuild/example/hello-greet/0.0.1-SNAPSHOT/|grep example
     hello-greet-extra_example-0.0.1-SNAPSHOT-classy.jar
     hello-greet-extra_example-0.0.1-SNAPSHOT-classy.jar.md5
     hello-greet-extra_example-0.0.1-SNAPSHOT-classy.jar.sha1

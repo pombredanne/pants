@@ -1,32 +1,25 @@
 # coding=utf-8
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
-# Licensed under the Apache License, Version 2.0 (see LICENSE)
+# Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 from pants.backend.android.targets.android_target import AndroidTarget
-from pants.backend.android.targets.build_type_mixin import BuildTypeMixin
+from pants.base.exceptions import TargetDefinitionException
+from pants.util.memo import memoized_property
 
 
-class AndroidBinary(AndroidTarget, BuildTypeMixin):
-  """Produces an Android binary."""
+class AndroidBinary(AndroidTarget):
+  """An Android binary."""
 
-  def __init__(self,
-               build_type=None,
-               *args,
-               **kwargs):
-    """
-    :param string build_type: One of [debug, release]. The keystore to sign the package with.
-      Set as 'debug' by default.
-    """
+  def __init__(self, *args, **kwargs):
     super(AndroidBinary, self).__init__(*args, **kwargs)
-    self._build_type = None
-    # default to 'debug' builds for now.
-    self._keystore = build_type if build_type else 'debug'
 
-  @property
-  def build_type(self):
-    if self._build_type is None:
-      self._build_type = self.get_build_type(self._keystore)
-    return self._build_type
+  @memoized_property
+  def target_sdk(self):
+    """Return the SDK version to use when compiling this target."""
+    if not self.manifest.target_sdk:
+      raise TargetDefinitionException(self, "AndroidBinary targets must declare targetSdkVersion "
+                                            "in the AndroidManifest.xml.")
+    return self.manifest.target_sdk

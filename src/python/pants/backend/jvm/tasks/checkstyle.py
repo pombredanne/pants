@@ -2,113 +2,126 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import os
 
-from pants.backend.jvm.tasks.jvm_tool_task_mixin import JvmToolTaskMixin
+from twitter.common.collections import OrderedSet
+
+from pants.backend.jvm.subsystems.shader import Shader
+from pants.backend.jvm.targets.jar_dependency import JarDependency
 from pants.backend.jvm.tasks.nailgun_task import NailgunTask
 from pants.base.exceptions import TaskError
+from pants.option.custom_types import dict_option, file_option
 from pants.process.xargs import Xargs
 from pants.util.dirutil import safe_open
 
 
-CHECKSTYLE_MAIN = 'com.puppycrawl.tools.checkstyle.Main'
+class Checkstyle(NailgunTask):
+  """Check Java code for style violations."""
 
+  _CHECKSTYLE_MAIN = 'com.puppycrawl.tools.checkstyle.Main'
 
-class Checkstyle(NailgunTask, JvmToolTaskMixin):
+  _JAVA_SOURCE_EXTENSION = '.java'
 
-  _CONFIG_SECTION = 'checkstyle'
-
-  @staticmethod
-  def _is_checked(target):
-    return target.is_java and not target.is_synthetic
+  _CHECKSTYLE_BOOTSTRAP_KEY = "checkstyle"
 
   @classmethod
   def register_options(cls, register):
     super(Checkstyle, cls).register_options(register)
-    register('--skip', action='store_true', help='Skip checkstyle.')
-    register('--configuration', help='Path to the checkstyle configuration file.')
-    register('--suppression_files', default=[],
-             help='List of checkstyle supression configuration files.')
-    register('--properties', default={},
+    register('--skip', action='store_true', fingerprint=True,
+             help='Skip checkstyle.')
+    register('--configuration', advanced=True, type=file_option, fingerprint=True,
+             help='Path to the checkstyle configuration file.')
+    register('--properties', advanced=True, type=dict_option, default={}, fingerprint=True,
              help='Dictionary of property mappings to use for checkstyle.properties.')
-    register('--confs', default=['default'],
-             help='One or more ivy configurations to resolve for this target. This parameter is '
-                  'not intended for general use. ')
-    register('--bootstrap-tools', default=['//:twitter-checkstyle'],
-             help='Pants targets used to bootstrap this tool.')
+    register('--confs', advanced=True, default=['default'],
+             help='One or more ivy configurations to resolve for this target.')
+    register('--jvm-options', advanced=True, action='append', metavar='<option>...',
+             help='Run checkstyle with these extra jvm options.')
+    cls.register_jvm_tool(register,
+                          'checkstyle',
+                          classpath=[
+                            # Pants still officially supports java 6 as a tool; the supported
+                            # development environment for a pants hacker is based on that.  As
+                            # such, we use 6.1.1 here since its the last checkstyle version
+                            # compiled to java 6.  See the release notes here:
+                            # http://checkstyle.sourceforge.net/releasenotes.html
+                            JarDependency(org='com.puppycrawl.tools',
+                                          name='checkstyle',
+                                          rev='6.1.1'),
+                          ],
+                          main=cls._CHECKSTYLE_MAIN,
+                          custom_rules=[
+                              # Checkstyle uses reflection to load checks and has an affordance that
+                              # allows leaving off a check classes' package name.  This affordance
+                              # breaks for built-in checkstyle checks under shading so we ensure all
+                              # checkstyle packages are excluded from shading such that just its
+                              # third party transitive deps (guava and the like), are shaded.
+                              # See the module configuration rules here which describe this:
+                              #   http://checkstyle.sourceforge.net/config.html#Modules
+                              Shader.exclude_package('com.puppycrawl.tools.checkstyle',
+                                                     recursive=True),
+                          ])
 
-  def __init__(self, *args, **kwargs):
-    super(Checkstyle, self).__init__(*args, **kwargs)
+  @classmethod
+  def prepare(cls, options, round_manager):
+    super(Checkstyle, cls).prepare(options, round_manager)
+    round_manager.require_data('runtime_classpath')
 
-    self._checkstyle_bootstrap_key = 'checkstyle'
-    self.register_jvm_tool(self._checkstyle_bootstrap_key, self.get_options().bootstrap_tools,
-                           ini_section=self.options_scope,
-                           ini_key='bootstrap-tools')
-
-    suppression_files = self.get_options().supression_files
-    self._properties = self.get_options().properties
-    self._properties['checkstyle.suppression.files'] = ','.join(suppression_files)
-    self._confs = self.context.config.getlist(self._CONFIG_SECTION, 'confs', )
+  def _is_checked(self, target):
+    return target.has_sources(self._JAVA_SOURCE_EXTENSION) and not target.is_synthetic
 
   @property
-  def config_section(self):
-    return self._CONFIG_SECTION
-
-  def prepare(self, round_manager):
-    # TODO(John Sirois): this is a fake requirement on 'ivy_jar_products' in order to force
-    # resolve to run before this goal. Require a new CompileClasspath product to be produced by
-    # IvyResolve instead.
-    # See: https://github.com/pantsbuild/pants/issues/310
-    round_manager.require_data('ivy_jar_products')
-    round_manager.require_data('exclusives_groups')
+  def cache_target_dirs(self):
+    return True
 
   def execute(self):
     if self.get_options().skip:
       return
     targets = self.context.targets(self._is_checked)
     with self.invalidated(targets) as invalidation_check:
-      invalid_targets = []
-      for vt in invalidation_check.invalid_vts:
-        invalid_targets.extend(vt.targets)
+      invalid_targets = [vt.target for vt in invalidation_check.invalid_vts]
       sources = self.calculate_sources(invalid_targets)
       if sources:
-        result = self.checkstyle(sources, invalid_targets)
+        result = self.checkstyle(invalid_targets, sources)
         if result != 0:
-          raise TaskError('java %s ... exited non-zero (%i)' % (CHECKSTYLE_MAIN, result))
+          raise TaskError('java {main} ... exited non-zero ({result})'.format(
+            main=self._CHECKSTYLE_MAIN, result=result))
 
   def calculate_sources(self, targets):
     sources = set()
     for target in targets:
       sources.update(source for source in target.sources_relative_to_buildroot()
-                     if source.endswith('.java'))
+                     if source.endswith(self._JAVA_SOURCE_EXTENSION))
     return sources
 
-  def checkstyle(self, sources, targets):
-    egroups = self.context.products.get_data('exclusives_groups')
-    etag = egroups.get_group_key_for_target(targets[0])
-    classpath = self.tool_classpath(self._checkstyle_bootstrap_key)
-    cp = egroups.get_classpath_for_group(etag)
-    classpath.extend(jar for conf, jar in cp if conf in self.get_options().confs)
+  def checkstyle(self, targets, sources):
+    runtime_classpaths = self.context.products.get_data('runtime_classpath')
+    union_classpath = OrderedSet(self.tool_classpath('checkstyle'))
+    for target in targets:
+      runtime_classpath = runtime_classpaths.get_for_targets(target.closure(bfs=True))
+      union_classpath.update(jar for conf, jar in runtime_classpath
+                             if conf in self.get_options().confs)
 
     args = [
       '-c', self.get_options().configuration,
       '-f', 'plain'
     ]
 
-    if self._properties:
+    if self.get_options().properties:
       properties_file = os.path.join(self.workdir, 'checkstyle.properties')
       with safe_open(properties_file, 'w') as pf:
-        for k, v in self._properties.items():
-          pf.write('%s=%s\n' % (k, v))
+        for k, v in self.get_options().properties.items():
+          pf.write('{key}={value}\n'.format(key=k, value=v))
       args.extend(['-p', properties_file])
 
     # We've hit known cases of checkstyle command lines being too long for the system so we guard
     # with Xargs since checkstyle does not accept, for example, @argfile style arguments.
     def call(xargs):
-      return self.runjava(classpath=classpath, main=CHECKSTYLE_MAIN,
+      return self.runjava(classpath=union_classpath, main=self._CHECKSTYLE_MAIN,
+                          jvm_options=self.get_options().jvm_options,
                           args=args + xargs, workunit_name='checkstyle')
     checks = Xargs(call)
 

@@ -14,13 +14,13 @@ See [[How To Ask|pants('src/python/pants/docs:howto_ask')]]
 Join the Conversation
 ---------------------
 
-Join the [pants-devel Google
-Group](https://groups.google.com/forum/#!forum/pants-devel) to keep in
-touch with other pants developers.
+Join the [pants-devel Google Group][pants-devel] to keep in touch with other
+pants developers.
 
-Join the [pants-reviews Google
-Group](https://groups.google.com/forum/#!forum/pants-reviews) to see
-many code reviews.
+Join the [pantsbuild Slack team](https://pantsbuild.slack.com) and hop on the
+`#general` channel for higher bandwidth questions and answers about hacking on
+or using pants. You can [send yourself an invite](https://pantsslack.herokuapp.com/) or ask for one
+on the [pants-devel Google group][pants-devel].
 
 Watch the [pantsbuild/pants Github
 project](https://github.com/pantsbuild/pants) for notifications of new
@@ -31,6 +31,8 @@ occasional announcements.
 
 Find out when the CI tests go red/green by adding your email address to
 [.travis.yml](https://github.com/pantsbuild/pants/blob/master/.travis.yml).
+
+[pants-devel]: https://groups.google.com/forum/#!forum/pants-devel "pants-devel Google Group"
 
 Life of a Change
 ----------------
@@ -44,8 +46,11 @@ level, the steps are:
 -   Get a code review.
 -   Commit your change to master.
 
-Please note--despite being hosted on GitHub--we do not use just pull requests.
-This is because we prefer a linear commit history and doing code reviews with Review Board.
+Please note--despite being hosted on GitHub--we do not use pull
+requests to merge to master; we prefer to maintain a linear commit
+history and to do code reviews with Review Board. You will however
+need to create a Github pull request in order to kick off CI and test
+coverage runs.
 
 ### Identify the change
 
@@ -98,6 +103,18 @@ branch using the [syncing a
 fork](https://help.github.com/articles/syncing-a-fork/) instructions on
 github.
 
+Whether you've cloned the repo or your fork of the repo, you should setup the
+local pre-commit hooks to ensure your commits meet minimum compliance checks
+before pushing branches to ci:
+
+    :::bash
+    $ ./build-support/bin/setup.sh
+
+You can always run the pre-commit checks manually via:
+
+    :::bash
+    $ ./build-support/bin/pre-commit.sh
+
 **Pro tip:** If you want your local master branch to be an exact copy of
 the `pantsbuild/pants` repo's master branch, use these commands:
 
@@ -136,14 +153,29 @@ Now that your change is complete, post it for review. We use `rbcommons.com` to 
 
 #### Posting the First Draft
 
-**Before posting your first review,** you must create an account at
-<https://rbcommons.com> . To create one, visit
-<https://rbcommons.com/account/login/> and click "Create one now."
+**Before posting your first review,** you need to both subscribe to the [pants-reviews
+Google Group](https://groups.google.com/forum/#!forum/pants-reviews) and create an
+[RBCommons](https://rbcommons.com) account.  Its critical that the email address you use for each
+of these is the same, and it's also recommended that you have that same email address registered as
+one of your [email addresses](https://github.com/settings/emails) with Github.
+
+_A special warning to `@twitter.com` contributors:_ The twitter.com email domain does not permit
+emails being sent on behalf of its members by RBCommons. As such, you should use a personal email
+address or some other non-`@twitter.com` email address to subscribe to both RBCommons and
+pants-reviews.
+
+To create your RBCommons account, visit <https://rbcommons.com/account/login/> and click "Create
+one now.".  To sign up for pants-reviews@googlegroups.com, just browse to
+<https://groups.google.com/forum/#!forum/pants-reviews/join>.
 
 To set up local tools, run `./rbt help`. (`./rbt` is a wrapper around
 the usual RBTools [rbt](http://www.reviewboard.org/docs/rbtools/dev/)
 script.) The first time this runs it will bootstrap: you'll see a lot of
 building info.
+
+Before you post your review to Review Board you should <a
+pantsref="dev_run_all_tests">create a Github pull request</a> in order
+to kick off a Travis-CI run against your change.
 
 Post your change for review:
 
@@ -157,12 +189,14 @@ This `post` creates a new review, but does not yet publish it.
 
 At the provided URL, there's a web form. To get your change reviewed,
 you must fill in the change description, reviewers, testing done, etc.
-To make sure it gets seen, add `pants-reviews` to the Groups field and a
-specific reviewer to the People field. If you have created a
-<a pantsref="dev_run_all_tests">pull request on github to run Travis-CI</a>,
-put the pull
-request number in the Bug field and your git branch name in the Branch
-field.
+To make sure it gets seen by the appropriate people and that they have
+the appropriate context, add:
+
+- `pants-reviews` to the Groups field
+- Any specific [pants committers](https://www.rbcommons.com/s/twitter/users/) 
+  who should review your change to the People field
+- The pull request number from your Github pull request in the Bug field
+- Your git branch name in the Branch field.
 
 When the review looks good, publish it. An email will be sent to the
 `pants-reviews` mailing list and the reviewers will take a look. (For
@@ -170,6 +204,10 @@ your first review, double-check that the mail got sent; rbcommons tries
 to "spoof" mail from you and it doesn't work for everybody's email
 address. If your address doesn't work, you might want to use another
 one.)
+
+Note that while only committers are available to add in the People field,
+users with an rbcommons account may still post reviews if you provide
+them with a link manually or they see it in the google group.
 
 #### Iterating
 
@@ -220,4 +258,3 @@ Finally,
 
 The very last step is closing the review as "Submitted". The change is
 now complete. Huzzah!
-

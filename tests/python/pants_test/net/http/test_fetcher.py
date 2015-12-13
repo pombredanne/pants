@@ -2,16 +2,15 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from contextlib import closing
 import os
+from contextlib import closing
 
 import mox
-import pytest
 import requests
-from twitter.common.lang import Compatibility
+from six import StringIO
 
 from pants.net.http.fetcher import Fetcher
 from pants.util.contextutil import temporary_file
@@ -81,7 +80,7 @@ class FetcherTest(mox.MoxTestBase):
 
     self.mox.ReplayAll()
 
-    with closing(Compatibility.StringIO()) as fp:
+    with closing(StringIO()) as fp:
       self.fetcher.fetch('http://foo',
                          Fetcher.DownloadListener(fp).wrap(self.listener),
                          chunk_size_bytes=1024 * 1024,
@@ -102,7 +101,7 @@ class FetcherTest(mox.MoxTestBase):
 
     self.mox.ReplayAll()
 
-    with pytest.raises(self.fetcher.Error):
+    with self.assertRaises(self.fetcher.Error):
       self.fetcher.fetch('http://foo',
                          self.listener,
                          chunk_size_bytes=1024,
@@ -113,7 +112,7 @@ class FetcherTest(mox.MoxTestBase):
 
     self.mox.ReplayAll()
 
-    with pytest.raises(self.fetcher.TransientError):
+    with self.assertRaises(self.fetcher.TransientError):
       self.fetcher.fetch('http://foo',
                          self.listener,
                          chunk_size_bytes=1024,
@@ -124,12 +123,12 @@ class FetcherTest(mox.MoxTestBase):
 
     self.mox.ReplayAll()
 
-    with pytest.raises(self.fetcher.PermanentError) as e:
+    with self.assertRaises(self.fetcher.PermanentError) as e:
       self.fetcher.fetch('http://foo',
                          self.listener,
                          chunk_size_bytes=1024,
                          timeout_secs=60)
-    self.assertTrue(e.value.response_code is None)
+    self.assertTrue(e.exception.response_code is None)
 
   def test_http_error(self):
     self.requests.get('http://foo', stream=True, timeout=60).AndReturn(self.response)
@@ -140,12 +139,12 @@ class FetcherTest(mox.MoxTestBase):
 
     self.mox.ReplayAll()
 
-    with pytest.raises(self.fetcher.PermanentError) as e:
+    with self.assertRaises(self.fetcher.PermanentError) as e:
       self.fetcher.fetch('http://foo',
                          self.listener,
                          chunk_size_bytes=1024,
                          timeout_secs=60)
-    self.assertEqual(404, e.value.response_code)
+    self.assertEqual(404, e.exception.response_code)
 
   def test_iter_content_error(self):
     self.requests.get('http://foo', stream=True, timeout=60).AndReturn(self.response)
@@ -158,7 +157,7 @@ class FetcherTest(mox.MoxTestBase):
 
     self.mox.ReplayAll()
 
-    with pytest.raises(self.fetcher.TransientError):
+    with self.assertRaises(self.fetcher.TransientError):
       self.fetcher.fetch('http://foo',
                          self.listener,
                          chunk_size_bytes=1024,

@@ -1,33 +1,6 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-python_test_suite(
-  name = 'all',
-  dependencies = [
-    ':python',
-  ],
-)
-
-python_test_suite(
-  name = 'python',
-  dependencies = [
-    ':test_antlr_builder',
-    ':test_interpreter_cache',
-    ':test_resolver',
-    ':test_thrift_builder',
-    ':test_thrift_namespace_packages',
-  ]
-)
-
-python_test_suite(
-  name = 'integration',
-  dependencies = [
-    ':interpreter_selection_integration',
-    ':python_repl_integration',
-    ':python_run_integration',
-  ]
-)
-
 # XXX this tests the code running the test, not the code under test!
 python_tests(
   name = 'test_antlr_builder',
@@ -45,33 +18,9 @@ python_tests(
   name = 'test_thrift_namespace_packages',
   sources = ['test_thrift_namespace_packages.py'],
   dependencies = [
-    'testprojects/src/thrift/com/pants/testing:duck-py',
-    'testprojects/src/thrift/com/pants/testing:goose-py',
+    'testprojects/src/thrift/org/pantsbuild/testing:duck-py',
+    'testprojects/src/thrift/org/pantsbuild/testing:goose-py',
   ],
-)
-
-python_tests(name = 'test_resolver',
-  sources = ['test_resolver.py'],
-  dependencies = [
-    '3rdparty/python:pex',
-    'src/python/pants/base:config',
-    'src/python/pants/backend/python:resolver',
-    'src/python/pants/util:contextutil',
-  ],
-)
-
-python_tests(name = 'test_thrift_builder',
-  sources = ['test_thrift_builder.py'],
-  dependencies = [
-    '3rdparty/python:mock',
-    '3rdparty/python:pex',
-    '3rdparty/python/twitter/commons:twitter.common.config',
-    'src/python/pants/backend/codegen/targets:python',
-    'src/python/pants/backend/python:thrift_builder',
-    'src/python/pants/base:build_file_aliases',
-    'tests/python/pants_test/base:context_utils',
-    'tests/python/pants_test:base_test',
-  ]
 )
 
 python_library(
@@ -89,22 +38,17 @@ python_tests(
     'src/python/pants/util:contextutil',
     'tests/python/pants_test:int-test',
   ],
+  tags = {'integration'},
 )
 
 python_tests(
   name = 'python_run_integration',
   sources = ['test_python_run_integration.py'],
   dependencies = [
+    'src/python/pants/util:contextutil',
     'tests/python/pants_test:int-test',
   ],
-)
-
-python_tests(
-  name = 'python_repl_integration',
-  sources = ['test_python_repl_integration.py'],
-  dependencies = [
-    'tests/python/pants_test:int-test',
-  ],
+  tags = {'integration'},
 )
 
 python_tests(
@@ -112,29 +56,13 @@ python_tests(
   sources = ['test_interpreter_cache.py'],
   dependencies = [
     '3rdparty/python:mock',
+    '3rdparty/python:pex',
     'src/python/pants/backend/python:interpreter_cache',
+    'src/python/pants/backend/python:python_setup',
     'src/python/pants/util:contextutil',
+    'tests/python/pants_test/subsystem:subsystem_utils',
   ],
 )
-
-python_tests(
-  name = 'test_python_setup',
-  sources = ['test_python_setup.py'],
-  dependencies = [
-    '3rdparty/python/twitter/commons:twitter.common.collections',
-    '3rdparty/python/twitter/commons:twitter.common.dirutil',
-    '3rdparty/python:mock',
-    'src/python/pants/backend/core/targets:common',
-    'src/python/pants/backend/python:python_artifact',
-    'src/python/pants/backend/python/targets:python',
-    'src/python/pants/backend/python/tasks:python',
-    'src/python/pants/base:exceptions',
-    'src/python/pants/base:target',
-    'src/python/pants/util:contextutil',
-    'src/python/pants/util:dirutil',
-    'tests/python/pants_test:task_test_base',
-    ],
-  )
 
 # Used by interpreter_selection_integration.
 python_binary(

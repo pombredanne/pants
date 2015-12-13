@@ -2,11 +2,15 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
+
 import os
 
 from pants.backend.jvm.targets.java_library import JavaLibrary
 from pants.backend.jvm.tasks.jar_task import JarTask
 from pants.util.dirutil import safe_mkdir
+
 
 ##
 ## See `Appendix A` in the 'publish' documentation:
@@ -16,15 +20,16 @@ from pants.util.dirutil import safe_mkdir
 ## for tips on how to adapt this example task for your own custom publishing needs.
 ##
 class ExtraTestJarExample(JarTask):
+  """Example of a pants publish plugin.
+
+  For every JarLibrary target in the build graph, this plugin will create an 'example.txt' file,
+  which will be placed in an additional jar. During publishing, this additional jar will be published
+  along with the target.
   """
-  Example of a pants publish plugin. For every JarLibrary target in the build graph, this plugin
-  will create an 'example.txt' file, which will be placed in an additional jar. During publishing,
-  this additional jar will be published along with the target.
-  """
+
   def __init__(self, context, workdir):
     # Constructor for custom task. Setup things that you need at pants initialization time.
     super(ExtraTestJarExample, self).__init__(context, workdir)
-
 
   # This method is called by pants, when the RoundEngine gets to the phase where your task is
   # attached.

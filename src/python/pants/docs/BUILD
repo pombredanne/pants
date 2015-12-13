@@ -5,6 +5,7 @@ page(
     ':credits',
     ':dev_tasks',
     ':docs',
+    ':export',
     ':howto_ask',
     ':howto_contribute',
     ':howto_develop',
@@ -12,6 +13,7 @@ page(
     ':intellij',
     ':internals',
     ':release',
+    ':release_jvm',
   ]
 )
 
@@ -23,6 +25,10 @@ page(
 page(
   name='dev_tasks',
   source='dev_tasks.md',
+  links=[
+    ':howto_plugin',
+    'src/docs:invoking',
+  ],
 )
 
 page(
@@ -33,6 +39,11 @@ page(
 page(
   name='docs',
   source='docs.md',
+)
+
+page(
+  name='export',
+  source='export.md',
 )
 
 page(
@@ -89,5 +100,16 @@ page(
 page(
   name='release',
   source='release.md',
+  links=[
+    ':release_jvm',
+  ]
+)
+
+page(
+  name='release_jvm',
+  source='release_jvm.md',
+  links=[
+    'src/docs:publish',
+  ]
 )
 

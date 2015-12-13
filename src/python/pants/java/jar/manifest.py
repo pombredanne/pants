@@ -2,15 +2,12 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 from contextlib import closing
 
-from twitter.common.lang import Compatibility
-
-
-StringIO = Compatibility.StringIO
+from six import StringIO
 
 
 class Manifest(object):
@@ -19,6 +16,7 @@ class Manifest(object):
 
     See: http://docs.oracle.com/javase/1.5.0/docs/guide/jar/jar.html#Manifest Specification
   """
+
   @staticmethod
   def _wrap(text):
     text = text.encode('ascii')
@@ -28,7 +26,7 @@ class Manifest(object):
         chunk = fp.read(69)
         if not chunk:
           return
-        yield ' %s' % chunk
+        yield ' {}'.format(chunk)
 
   PATH = 'META-INF/MANIFEST.MF'
 
@@ -42,11 +40,16 @@ class Manifest(object):
 
   def addentry(self, header, value):
     if len(header) > 68:
-      raise ValueError('Header name must be 68 characters or less, given %s' % header)
+      raise ValueError('Header name must be 68 characters or less, given {}'.format(header))
     if self._contents:
       self._contents += '\n'
-    self._contents += '\n'.join(self._wrap('%s: %s' % (header, value)))
+    self._contents += '\n'.join(self._wrap('{header}: {value}'.format(header=header, value=value)))
 
   def contents(self):
     padded = self._contents + '\n'
     return padded.encode('ascii')
+
+  def is_empty(self):
+    if self._contents.strip():
+      return False
+    return True

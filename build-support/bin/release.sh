@@ -2,6 +2,14 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
+ROOT=$(cd $(dirname "${BASH_SOURCE[0]}") && cd "$(git rev-parse --show-toplevel)" && pwd)
+source ${ROOT}/build-support/common.sh
+
+PY=$(which python2.7)
+[[ -n "${PY}" ]] || die "You must have python2.7 installed and on the path to release."
+export PY
+
+source ${ROOT}/contrib/release_packages.sh
 
 #
 # List of packages to be released
@@ -21,49 +29,73 @@ PKG_PANTS=(
   "pantsbuild.pants"
   "//src/python/pants:pants-packaged"
   "pkg_pants_install_test"
-  )
+)
 function pkg_pants_install_test() {
   PIP_ARGS="$@"
-  pip install ${PIP_ARGS} pantsbuild.pants==$(local_version) && \
-  execute_packaged_pants_without_internal_backends goal list src:: && \
-  [[ "$(execute_packaged_pants_without_internal_backends --version 2>/dev/null)" \
-    == "$(local_version)" ]]
+  pip install ${PIP_ARGS} "${ROOT}/dist/pantsbuild.pants-$(local_version).tar.gz" || \
+    die "pip install of pantsbuild.pants failed!"
+  execute_packaged_pants_with_internal_backends list src:: || \
+    die "'pants list src::' failed in venv!"
+  [[ "$(execute_packaged_pants_with_internal_backends --version 2>/dev/null)" \
+     == "$(local_version)" ]] || die "Installed version of pants does match local version!"
 }
 
 PKG_PANTS_TESTINFRA=(
   "pantsbuild.pants.testinfra"
-  "//src/python/pants:test_infra"
+  "//tests/python/pants_test:test_infra"
   "pkg_pants_testinfra_install_test"
-  )
+)
 function pkg_pants_testinfra_install_test() {
   PIP_ARGS="$@"
-  pip install ${PIP_ARGS} pantsbuild.pants.testinfra==$(local_version) \
-    --allow-external antlr-python-runtime --allow-unverified antlr-python-runtime && \
+  pip install ${PIP_ARGS} "${ROOT}/dist/pantsbuild.pants.testinfra-$(local_version).tar.gz" && \
   python -c "import pants_test"
 }
 
-# Once individual (new) package is declared above, insert it into the array below)
-RELEASE_PACKAGES=(PKG_PANTS PKG_PANTS_TESTINFRA)
+PKG_PANTS_BACKEND_ANDROID=(
+  "pantsbuild.pants.backend.android"
+  "//src/python/pants/backend/android:plugin"
+  "pkg_pants_backend_android_install_test"
+)
+function pkg_pants_backend_android_install_test() {
+  execute_packaged_pants_with_internal_backends \
+    --plugins="['pantsbuild.pants.backend.android==$(local_version)']" \
+    goals | grep "apk" &> /dev/null
+}
+
+# Once an individual (new) package is declared above, insert it into the array below)
+RELEASE_PACKAGES=(
+  PKG_PANTS
+  PKG_PANTS_BACKEND_ANDROID
+  PKG_PANTS_TESTINFRA
+  ${CONTRIB_PACKAGES[*]}
+)
 #
 # End of package declarations.
 #
 
 
-ROOT=$(cd $(dirname "${BASH_SOURCE[0]}") && cd "$(git rev-parse --show-toplevel)" && pwd)
-source ${ROOT}/build-support/common.sh
-
 function run_local_pants() {
-  PANTS_DEV=1 ${ROOT}/pants "$@"
+  ${ROOT}/pants "$@"
 }
 
 # When we do (dry-run) testing, we need to run the packaged pants.
 # It doesn't have internal backend plugins so when we execute it
 # at the repo build root, the root pants.ini will ask it load
-# internal backend packages, which it doesn't have, and it'll fail.
-# To solve that problem, we override pants.ini with an empty list of
-# additional backends option.
-function execute_packaged_pants_without_internal_backends() {
-  PANTS_CONFIG_OVERRIDE=pants.no.internal.backend.ini pants "$@"
+# internal backend packages and their dependencies which it doesn't have,
+# and it'll fail. To solve that problem, we load the internal backend package
+# dependencies into the pantsbuild.pants venv.
+function execute_packaged_pants_with_internal_backends() {
+  pip install --ignore-installed \
+    -r pants-plugins/3rdparty/python/requirements.txt &> /dev/null && \
+  PANTS_PYTHON_REPOS_REPOS="['${ROOT}/dist']" pants \
+    --pythonpath="['pants-plugins/src/python']" \
+    --backend-packages="[ \
+        'internal_backend.optional', \
+        'internal_backend.repositories', \
+        'internal_backend.sitegen', \
+        'internal_backend.utilities', \
+      ]" \
+    "$@"
 }
 
 function pkg_name() {
@@ -96,24 +128,21 @@ function build_packages() {
 
     banner "Building package ${NAME}-$(local_version) with target '${BUILD_TARGET}' ..."
 
-    run_local_pants goal setup-py --recursive ${BUILD_TARGET} || \
+    run_local_pants setup-py --recursive ${BUILD_TARGET} || \
     die "Failed to build package ${NAME}-$(local_version) with target '${BUILD_TARGET}'!"
   done
 }
 
 function publish_packages() {
+  targets=()
   for PACKAGE in "${RELEASE_PACKAGES[@]}"
   do
-    NAME=$(pkg_name $PACKAGE)
-    BUILD_TARGET=$(pkg_build_target $PACKAGE)
-
-    banner "Publishing package ${NAME}-$(local_version) with target '${BUILD_TARGET}' ..."
-
-    # TODO(Jin Feng) Note --recursive option would cause some of the packages being
-    # uploaded multiple times because of dependencies. No harms, but not efficient.
-    run_local_pants goal setup-py --run="sdist upload" --recursive ${BUILD_TARGET} || \
-    die "Failed to publish package ${NAME}-$(local_version) with target '${BUILD_TARGET}'!"
+    targets+=($(pkg_build_target $PACKAGE))
   done
+  banner "Publishing packages ..."
+  run_local_pants setup-py --run="register sdist upload --sign --identity=$(get_pgp_keyid)" \
+    --recursive ${targets[@]} || \
+  die "Failed to publish packages!"
 }
 
 function pre_install() {
@@ -124,11 +153,38 @@ function pre_install() {
 
 function post_install() {
   # this assume pre_install is called and a new temp venv activation has been done.
+  if [[ "${pause_after_venv_creation}" == "true" ]]; then
+    cat <<EOM
+
+If you want to poke around with the new version of pants that has been built
+and installed in a temporary virtualenv, fire up another shell window and type:
+
+  source ${VENV_DIR}/bin/activate
+  cd ${ROOT}
+
+From there, you can run 'pants' (not './pants') to do some testing.
+
+When you're done testing, press enter to continue.
+EOM
+    read
+  fi
   deactivate
 }
 
 function install_and_test_packages() {
-  PIP_ARGS="$@"
+  PIP_ARGS=(
+    "$@"
+    --quiet
+
+    # Make sure we go out and hit pypi to get the new packages.
+    --no-cache-dir
+  )
+
+  pre_install || die "Failed to setup virtualenv while testing ${NAME}-$(local_version)!"
+
+  # Make sure we install fresh plugins since pants uses a fixed version number between releases.
+  export PANTS_PLUGIN_CACHE_DIR=$(mktemp -d -t plugins_cache.XXXXX)
+  trap "rm -rf ${PANTS_PLUGIN_CACHE_DIR}" EXIT
 
   for PACKAGE in "${RELEASE_PACKAGES[@]}"
   do
@@ -137,11 +193,12 @@ function install_and_test_packages() {
 
     banner "Installing and testing package ${NAME}-$(local_version) ..."
 
-    pre_install && \
-    eval $INSTALL_TEST_FUNC $PIP_ARGS && \
-    post_install || \
+    eval $INSTALL_TEST_FUNC ${PIP_ARGS[@]} || \
     die "Failed to install and test package ${NAME}-$(local_version)!"
   done
+
+  post_install || die "Failed to deactivate virtual env while testing ${NAME}-$(local_version)!"
+
 }
 
 function dry_run_install() {
@@ -149,19 +206,221 @@ function dry_run_install() {
   install_and_test_packages --find-links=file://${ROOT}/dist
 }
 
-function usage() {
+ALLOWED_ORIGIN_URLS=(
+  git@github.com:pantsbuild/pants.git
+  https://github.com/pantsbuild/pants.git
+)
+
+function check_origin() {
+  banner "Checking for a valid git origin"
+
+  origin_url="$(git remote -v | grep origin | grep "\(push\)" | cut -f2 | cut -d' ' -f1)"
+  for url in "${ALLOWED_ORIGIN_URLS[@]}"
+  do
+    if [[ "${origin_url}" == "${url}" ]]
+    then
+      return
+    fi
+  done
+  msg=$(cat << EOM
+Your origin url is not valid for releasing:
+  ${origin_url}
+
+It must be one of:
+$(echo "${ALLOWED_ORIGIN_URLS[@]}" | tr ' ' '\n' | sed -E "s|^|  |")
+EOM
+)
+  die "$msg"
+}
+
+function check_clean_master() {
+  banner "Checking for a clean master branch"
+
+  [[
+    -z "$(git status --porcelain)" &&
+    "$(git branch | grep -E '^\* ' | cut -d' ' -f2-)" == "master"
+  ]] || die "You are not on a clean master branch."
+}
+
+function check_pgp() {
+  banner "Checking pgp setup"
+
+  msg=$(cat << EOM
+You must configure your release signing pgp key.
+
+You can configure the key by running:
+  git config --add user.signingkey [key id]
+
+Key id should be the id of the pgp key you have registered with pypi.
+EOM
+)
+  get_pgp_keyid &> /dev/null || die "${msg}"
+  echo "Found the following key for release signing:"
+  gpg -k $(get_pgp_keyid)
+  read -p "Is this the correct key? [Yn]: " answer
+  [[ "${answer:-y}" =~ [Yy]([Ee][Ss])? ]] || die "${msg}"
+}
+
+function get_pgp_keyid() {
+  git config --get user.signingkey
+}
+
+function check_pypi() {
+  if [[ ! -r ~/.pypirc ]]
+  then
+    msg=$(cat << EOM
+You must create a ~/.pypirc file with your pypi credentials:
+cat << EOF > ~/.pypirc && chmod 600 ~/.pypirc
+[server-login]
+username: <fill me in>
+password: <fill me in>
+EOF
+
+More information is here: https://wiki.python.org/moin/EnhancedPyPI
+EOM
+)
+    die "${msg}"
+  fi
+  ${PY} << EOF || die
+from __future__ import print_function
+
+import os
+import sys
+from ConfigParser import ConfigParser
+
+config = ConfigParser()
+config.read(os.path.expanduser('~/.pypirc'))
+
+def check_option(section, option):
+  if config.has_option(section, option):
+    return config.get(section, option)
+  print('Your ~/.pypirc must define a {} option in the {} section'.format(option, section))
+
+username = check_option('server-login', 'username')
+if not (username or check_option('server-login', 'password')):
+  sys.exit(1)
+else:
+  print(username)
+EOF
+}
+
+function tag_release() {
+  release_version="$(local_version)" && \
+  tag_name="release_${release_version}" && \
+  git tag \
+    --local-user=$(get_pgp_keyid) \
+    -m "pantsbuild.pants release ${release_version}" \
+    ${tag_name} && \
+  git push git@github.com:pantsbuild/pants.git ${tag_name}
+}
+
+function publish_docs() {
+  ${ROOT}/build-support/bin/publish_docs.sh -p -y
+}
+
+function list_packages() {
   echo "Releases the following source distributions to PyPi."
+  version="$(local_version)"
   for PACKAGE in "${RELEASE_PACKAGES[@]}"
   do
-    NAME=$(pkg_name $PACKAGE)
-    echo "    ${NAME}-$(local_version)"
+    echo "  $(pkg_name $PACKAGE)-${version}"
   done
-  echo
+}
+
+function package_exists() {
+  package_name="$1"
+
+  curl --fail --head https://pypi.python.org/pypi/${package_name} &>/dev/null
+}
+
+function get_owners() {
+  package_name="$1"
+
+  latest_package_path=$(
+    curl -s https://pypi.python.org/pypi/${package_name} | \
+      grep -oE  "/pypi/${package_name}/[0-9]*\.[0-9]*\.[0-9]*" | head -n1
+  )
+  curl -s "https://pypi.python.org${latest_package_path}" | \
+    grep -A1 "Owner" | tail -1 | \
+    cut -d'>' -f2 | cut -d'<' -f1 | \
+    tr ',' ' ' | sed -E -e "s|[[:space:]]+| |g"
+}
+
+function list_owners() {
+  for PACKAGE in "${RELEASE_PACKAGES[@]}"
+  do
+    package_name=$(pkg_name $PACKAGE)
+    if package_exists ${package_name}
+    then
+      echo "Owners of ${package_name}:"
+      owners=($(get_owners ${package_name}))
+      for owner in "${owners[@]}"
+      do
+        echo "  ${owner}"
+      done
+    else
+      echo "The ${package_name} package is new!  There are no owners yet."
+    fi
+    echo
+  done
+}
+
+function check_owner() {
+   username="$1"
+   package_name="$2"
+
+   for owner in $(get_owners ${package_name})
+   do
+     if [[ "${username}" == "${owner}" ]]
+     then
+       return 0
+     fi
+   done
+   return 1
+}
+
+function check_owners() {
+  username="$(check_pypi)"
+
+  total=${#RELEASE_PACKAGES[@]}
+  banner "Checking package ownership for pypi user ${username} of ${total} packages ..."
+  dont_own=()
+  index=0
+  for PACKAGE in "${RELEASE_PACKAGES[@]}"
+  do
+    index=$((index+1))
+    package_name="$(pkg_name $PACKAGE)"
+    banner "[${index}/${total}] checking that ${username} owns ${package_name}..."
+    if package_exists ${package_name}
+    then
+      if ! check_owner "${username}" "${package_name}"
+      then
+        dont_own+=("${package_name}")
+      fi
+    else
+      echo "The ${package_name} package is new!  There are no owners yet."
+    fi
+  done
+
+  if (( ${#dont_own[@]} > 0 ))
+  then
+    msg=$(cat << EOM
+Your pypi account ${username} needs to be added as an owner for the
+following packages:
+$(echo "${dont_own[@]}" | tr ' ' '\n' | sed -E "s|^|  |")
+EOM
+)
+    die "${msg}"
+  fi
+}
+
+function usage() {
   echo "With no options all packages are built, smoke tested and published to"
   echo "PyPi.  Credentials are needed for this as described in the"
   echo "release docs: http://pantsbuild.github.io/release.html"
   echo
-  echo "Usage: $0 (-h|-opd)"
+  echo "Usage: $0 [-d] (-h|-n|-t|-l|-o)"
+  echo " -d  Enables debug mode (verbose output, script pauses after venv creation)"
   echo " -h  Prints out this help message."
   echo " -n  Performs a release dry run."
   echo "       All package distributions will be built, installed locally in"
@@ -170,8 +429,10 @@ function usage() {
   echo " -t  Tests a live release."
   echo "       Ensures the latest packages have been propagated to PyPi"
   echo "       and can be installed in an ephemeral virtualenv."
+  echo " -l  Lists all pantsbuild packages that this script releases."
+  echo " -o  Lists all pantsbuild package owners."
   echo
-  echo "All options are mutually exclusive."
+  echo "All options (except for '-d') are mutually exclusive."
 
   if (( $# > 0 )); then
     die "$@"
@@ -180,14 +441,22 @@ function usage() {
   fi
 }
 
-while getopts "hnt" opt; do
+while getopts "hdntlo" opt; do
   case ${opt} in
     h) usage ;;
+    d) debug="true" ;;
     n) dry_run="true" ;;
     t) test_release="true" ;;
+    l) list_packages && exit 0 ;;
+    o) list_owners && exit 0 ;;
     *) usage "Invalid option: -${OPTARG}" ;;
   esac
 done
+
+if [[ "${debug}" == "true" ]]; then
+  set -x
+  pause_after_venv_creation="true"
+fi
 
 if [[ "${dry_run}" == "true" && "${test_release}" == "true" ]]; then
   usage "The dry run and test options are mutually exclusive, pick one."
@@ -206,7 +475,8 @@ elif [[ "${test_release}" == "true" ]]; then
 else
   banner "Releasing packages to PyPi." && \
   (
-    dry_run_install && publish_packages && \
-    banner "Successfully released packages to PyPi."
+    check_origin && check_clean_master && check_pgp && check_owners && \
+      dry_run_install && publish_packages && tag_release && publish_docs && \
+      banner "Successfully released packages to PyPi."
   ) || die "Failed to release packages to PyPi."
 fi

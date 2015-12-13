@@ -5,9 +5,7 @@ python_library(
   name = 'task_registrar',
   sources = ['task_registrar.py'],
   dependencies = [
-    ':error',
     ':goal',
-    'src/python/pants/backend/core/tasks:task',
   ],
 )
 
@@ -19,7 +17,7 @@ python_library(
   ]
 )
 
-# why is this in goal?
+# this is in goal because of run_tracker
 python_library(
   name = 'artifact_cache_stats',
   sources = ['artifact_cache_stats.py'],
@@ -34,33 +32,20 @@ python_library(
   dependencies = [
     ':products',
     ':workspace',
-    '3rdparty/python/twitter/commons:twitter.common.dirutil',
-    '3rdparty/python/twitter/commons:twitter.common.process',
-    'src/python/pants/base:address',
     'src/python/pants/base:build_environment',
-    'src/python/pants/base:source_root',
-    'src/python/pants/base:build_graph',
-    'src/python/pants/base:target', # XXX(fixme)
+    'src/python/pants/build_graph', # XXX(fixme)
+    'src/python/pants/base:worker_pool',
     'src/python/pants/base:workunit',
-    'src/python/pants/java:distribution',  # XXX(fixme)
+    'src/python/pants/java/distribution:distribution',
     'src/python/pants/process',
-    'src/python/pants/reporting',
+    'src/python/pants/reporting:report',
+    'src/python/pants/source',
   ],
 )
 
 python_library(
   name = 'error',
   sources = ['error.py'],
-)
-
-python_library(
-  name = 'initialize_reporting',  # XXX shouldn't this be in reporting?!
-  sources = ['initialize_reporting.py'],
-  dependencies = [
-    '3rdparty/python/twitter/commons:twitter.common.lang',
-    'src/python/pants/reporting',
-    'src/python/pants/util:dirutil',
-  ],
 )
 
 # TODO(benjy): As a result of a renaming, we ended up with this target owning only one source
@@ -72,14 +57,7 @@ python_library(
   sources = ['goal.py'],
   dependencies = [
     ':error',
-    ':mkflag',
-  ],
-)
-
-python_library(
-  name = 'mkflag',
-  sources = ['mkflag.py'],
-  dependencies = [
+    'src/python/pants/base:deprecated',
   ],
 )
 
@@ -88,6 +66,7 @@ python_library(
   sources = ['products.py'],
   dependencies = [
     '3rdparty/python/twitter/commons:twitter.common.collections',
+    'src/python/pants/util:dirutil',
   ],
 )
 
@@ -97,11 +76,15 @@ python_library(
   dependencies = [
     ':aggregated_timings',
     ':artifact_cache_stats',
+    '3rdparty/python:requests',
+    'src/python/pants/base:build_environment',
     'src/python/pants/base:run_info',
     'src/python/pants/base:worker_pool',
     'src/python/pants/base:workunit',
     'src/python/pants/reporting', # XXX(fixme)
-    'src/python/pants/base:config',
+    'src/python/pants/stats',
+    'src/python/pants/subsystem',
+    'src/python/pants/util:dirutil',
   ],
 )
 
@@ -109,8 +92,8 @@ python_library(
   name = 'workspace',
   sources = ['workspace.py'],
   dependencies = [
-    '3rdparty/python/twitter/commons:twitter.common.lang',
     'src/python/pants/base:build_environment',
     'src/python/pants/scm',
+    'src/python/pants/util:meta',
   ],
 )

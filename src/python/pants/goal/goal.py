@@ -2,13 +2,11 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from optparse import OptionGroup
-
+from pants.base.deprecated import deprecated
 from pants.goal.error import GoalError
-from pants.goal.mkflag import Mkflag
 
 
 class Goal(object):
@@ -22,6 +20,21 @@ class Goal(object):
     raise TypeError('Do not instantiate {0}. Call by_name() instead.'.format(cls))
 
   @classmethod
+  def register(cls, name, description):
+    """Register a goal description.
+
+    Otherwise the description must be set when registering some task on the goal,
+    which is clunky, and dependent on things like registration order of tasks in the goal.
+
+    A goal that isn't explicitly registered with a description will fall back to the description
+    of the task in that goal with the same name (if any).  So singleton goals (e.g., 'clean-all')
+    need not be registered explicitly.  This method is primarily useful for setting a
+    description on a generic goal like 'compile' or 'test', that multiple backends will
+    register tasks on.
+    """
+    cls.by_name(name)._description = description
+
+  @classmethod
   def by_name(cls, name):
     """Returns the unique object representing the goal of the specified name."""
     if name not in cls._goal_by_name:
@@ -32,7 +45,7 @@ class Goal(object):
   def clear(cls):
     """Remove all goals and tasks.
 
-    This method is EXCLUSIVELY for use in tests.
+    This method is EXCLUSIVELY for use in tests and during pantsd startup.
     """
     cls._goal_by_name.clear()
 
@@ -46,6 +59,14 @@ class Goal(object):
     """Returns all registered goals, sorted alphabetically by name."""
     return [pair[1] for pair in sorted(Goal._goal_by_name.items())]
 
+  @classmethod
+  def subsystems(cls):
+    """Returns all subsystem types used by all tasks, in no particular order."""
+    ret = set()
+    for goal in cls.all():
+      ret.update(goal.subsystems())
+    return ret
+
 
 class _Goal(object):
   def __init__(self, name):
@@ -54,11 +75,21 @@ class _Goal(object):
     Create goals only through the Goal.by_name() factory.
     """
     self.name = name
-    self.description = None
-    self.dependencies = set()  # The Goals this Goal depends on.
+    self._description = ''
     self.serialize = False
     self._task_type_by_name = {}  # name -> Task subclass.
     self._ordered_task_names = []  # The task names, in the order imposed by registration.
+
+  @property
+  def description(self):
+    if self._description:
+      return self._description
+    # Return the docstring for the Task registered under the same name as this goal, if any.
+    # This is a very common case, and therefore a useful idiom.
+    namesake_task = self._task_type_by_name.get(self.name)
+    if namesake_task:
+      return namesake_task.__doc__
+    return ''
 
   def register_options(self, options):
     for task_type in sorted(self.task_types(), key=lambda cls: cls.options_scope):
@@ -88,10 +119,15 @@ class _Goal(object):
     # a task *instance* know its scope, but this means converting option registration from
     # a class method to an instance method, and instantiating the task much sooner in the
     # lifecycle.
-
-    subclass_name = b'{0}_{1}'.format(task_registrar.task_type.__name__,
+    superclass = task_registrar.task_type
+    subclass_name = b'{0}_{1}'.format(superclass.__name__,
                                       options_scope.replace('.', '_').replace('-', '_'))
-    task_type = type(subclass_name, (task_registrar.task_type,), {'options_scope': options_scope})
+    task_type = type(subclass_name, (superclass,), {
+      '__doc__': superclass.__doc__,
+      '__module__': superclass.__module__,
+      'options_scope': options_scope,
+      '_stable_name': superclass.stable_name()
+    })
 
     otn = self._ordered_task_names
     if replace:
@@ -109,16 +145,18 @@ class _Goal(object):
       otn.append(task_name)
 
     self._task_type_by_name[task_name] = task_type
-    self.dependencies.update(task_registrar.dependencies)
 
     if task_registrar.serialize:
       self.serialize = True
 
     return self
 
+  @deprecated('0.0.66', "Single-task goals will take their description from the first sentence "
+                        "of that task's docstring.  Multiple-task goals can register a description "
+                        "explicitly using Goal.register(name, description).")
   def with_description(self, description):
     """Add a description to this goal."""
-    self.description = description
+    self._description = description
     return self
 
   def uninstall_task(self, name):
@@ -126,10 +164,8 @@ class _Goal(object):
 
     Allows external plugins to modify the execution plan. Use with caution.
 
-    Note: Does not remove goal dependencies or relax a serialization requirement that originated
+    Note: Does not relax a serialization requirement that originated
     from the uninstalled task's install() call.
-    TODO(benjy): Should it? We're moving away from explicit goal deps towards a
-                 product consumption-production model anyway.
     """
     if name in self._task_type_by_name:
       self._task_type_by_name[name].options_scope = None
@@ -138,13 +174,21 @@ class _Goal(object):
     else:
       raise GoalError('Cannot uninstall unknown task: {0}'.format(name))
 
-  def known_scopes(self):
-    """Yields all known scopes under this goal (including its own.)"""
-    yield self.name
+  def known_scope_infos(self):
+    """Yields ScopeInfos for all known scopes under this goal."""
+    # Note that we don't yield the goal's own scope. We don't need it (as we don't register
+    # options on it), and it's needlessly confusing when a task has the same name as its goal,
+    # in which case we shorten its scope to the goal's scope (e.g., idea.idea -> idea).
     for task_type in self.task_types():
-      for scope in task_type.known_scopes():
-        if scope != self.name:
-          yield scope
+      for scope_info in task_type.known_scope_infos():
+        yield scope_info
+
+  def subsystems(self):
+    """Returns all subsystem types used by tasks in this goal, in no particular order."""
+    ret = set()
+    for task_type in self.task_types():
+      ret.update([dep.subsystem_cls for dep in task_type.subsystem_dependencies_iter()])
+    return ret
 
   def ordered_task_names(self):
     """The task names in this goal, in registration order."""
@@ -157,6 +201,10 @@ class _Goal(object):
   def task_types(self):
     """Returns the task types in this goal, unordered."""
     return self._task_type_by_name.values()
+
+  def task_items(self):
+    for name, task_type in self._task_type_by_name.items():
+      yield name, task_type
 
   def has_task_of_type(self, typ):
     """Returns True if this goal has a task of the given type (or a subtype of it)."""

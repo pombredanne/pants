@@ -2,22 +2,59 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from collections import namedtuple
-from operator import eq, ne
+import ConfigParser
 import os
 import subprocess
-import unittest2 as unittest
+import unittest
+from collections import namedtuple
+from contextlib import contextmanager
+from operator import eq, ne
 
-from pants.fs.archive import ZIP
+from colors import strip_color
+
 from pants.base.build_environment import get_buildroot
+from pants.base.build_file import BuildFile
+from pants.fs.archive import ZIP
 from pants.util.contextutil import temporary_dir
-from pants.util.dirutil import safe_open, safe_mkdir
+from pants.util.dirutil import safe_mkdir, safe_open
+from pants_test.testutils.file_test_util import check_symlinks, contains_exact_files
 
 
-PantsResult = namedtuple('PantsResult', ['command', 'returncode', 'stdout_data', 'stderr_data'])
+PantsResult = namedtuple(
+  'PantsResult',
+  ['command', 'returncode', 'stdout_data', 'stderr_data', 'workdir'])
+
+
+def ensure_cached(expected_num_artifacts=None):
+  """Decorator for asserting cache writes in an integration test.
+
+  :param task_cls: Class of the task to check the artifact cache for. (e.g. JarCreate)
+  :param expected_num_artifacts: Expected number of artifacts to be in the task's
+                                 cache after running the test. If unspecified, will
+                                 assert that the number of artifacts in the cache is
+                                 non-zero.
+  """
+  def decorator(test_fn):
+    def wrapper(self, *args, **kwargs):
+      with temporary_dir() as artifact_cache:
+        cache_args = '--cache-write-to=["{}"]'.format(artifact_cache)
+
+        test_fn(self, *args + (cache_args,), **kwargs)
+
+        num_artifacts = 0
+        for (root, _, files) in os.walk(artifact_cache):
+          print(root, files)
+          num_artifacts += len(files)
+
+        if expected_num_artifacts is None:
+          self.assertNotEqual(num_artifacts, 0)
+        else:
+          self.assertEqual(num_artifacts, expected_num_artifacts)
+    return wrapper
+  return decorator
 
 
 class PantsRunIntegrationTest(unittest.TestCase):
@@ -38,46 +75,72 @@ class PantsRunIntegrationTest(unittest.TestCase):
     except OSError:
       return False
 
-  def workdir_root(self):
+  def temporary_workdir(self):
     # We can hard-code '.pants.d' here because we know that will always be its value
     # in the pantsbuild/pants repo (e.g., that's what we .gitignore in that repo).
     # Grabbing the pants_workdir config would require this pants's config object,
     # which we don't have a reference to here.
     root = os.path.join(get_buildroot(), '.pants.d', 'tmp')
     safe_mkdir(root)
-    return root
+    return temporary_dir(root_dir=root, suffix='.pants.d')
+
+  def temporary_cachedir(self):
+    return temporary_dir(suffix='__CACHEDIR')
+
+  def temporary_sourcedir(self):
+    return temporary_dir(root_dir=get_buildroot())
+
+  @contextmanager
+  def source_clone(self, source_dir):
+    with self.temporary_sourcedir() as clone_dir:
+      target_spec_dir = os.path.relpath(clone_dir)
+
+      for dir_path, dir_names, file_names in os.walk(source_dir):
+        clone_dir_path = os.path.join(clone_dir, os.path.relpath(dir_path, source_dir))
+        for dir_name in dir_names:
+          os.mkdir(os.path.join(clone_dir_path, dir_name))
+        for file_name in file_names:
+          with open(os.path.join(dir_path, file_name), 'r') as f:
+            content = f.read()
+          if BuildFile._is_buildfile_name(file_name):
+            content = content.replace(source_dir, target_spec_dir)
+          with open(os.path.join(clone_dir_path, file_name), 'w') as f:
+            f.write(content)
+
+      yield clone_dir
 
   def run_pants_with_workdir(self, command, workdir, config=None, stdin_data=None, extra_env=None,
                              **kwargs):
-    config = config.copy() if config else {}
 
-    # We add workdir to the DEFAULT section, and also ensure that it's emitted first.
-    default_section = config.pop('DEFAULT', {})
-    default_section['pants_workdir'] = '%s' % workdir
+    args = ['--no-pantsrc',
+            '--pants-workdir=' + workdir,
+            '--kill-nailguns',
+            '--print-exception-stacktrace']
 
-    ini = ''
-    for section, section_config in [('DEFAULT', default_section)] + config.items():
-      ini += '\n[%s]\n' % section
-      for key, val in section_config.items():
-        ini += '%s: %s\n' % (key, val)
+    if config:
+      config_data = config.copy()
+      ini = ConfigParser.ConfigParser(defaults=config_data.pop('DEFAULT', None))
+      for section, section_config in config_data.items():
+        ini.add_section(section)
+        for key, value in section_config.items():
+          ini.set(section, key, value)
+      ini_file_name = os.path.join(workdir, 'pants.ini')
+      with safe_open(ini_file_name, mode='w') as fp:
+        ini.write(fp)
+      args.append('--config-override=' + ini_file_name)
 
-    ini_file_name = os.path.join(workdir, 'pants.ini')
-    with safe_open(ini_file_name, mode='w') as fp:
-      fp.write(ini)
+    pants_script = os.path.join(get_buildroot(), self.PANTS_SCRIPT_NAME)
+    pants_command = [pants_script] + args + command
+
     env = os.environ.copy()
     env.update(extra_env or {})
-
-    # TODO: We can replace the env var with a '--config-override={0}'.format(ini_file_name) arg,
-    # once we're rid of the special-case handling of this env var in pants_exe.
-    env['PANTS_CONFIG_OVERRIDE'] = ini_file_name
-
-    pants_command = ([os.path.join(get_buildroot(), self.PANTS_SCRIPT_NAME)] + command +
-                     ['--no-lock', '--kill-nailguns', '--no-pantsrc'])
 
     proc = subprocess.Popen(pants_command, env=env, stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs)
     (stdout_data, stderr_data) = proc.communicate(stdin_data)
-    return PantsResult(pants_command, proc.returncode, stdout_data, stderr_data)
+
+    return PantsResult(pants_command, proc.returncode, stdout_data.decode("utf-8"),
+                       stderr_data.decode("utf-8"), workdir)
 
   def run_pants(self, command, config=None, stdin_data=None, extra_env=None, **kwargs):
     """Runs pants in a subprocess.
@@ -87,36 +150,64 @@ class PantsRunIntegrationTest(unittest.TestCase):
     map of key -> value. If order in the ini file matters, this should be an OrderedDict.
     :param kwargs: Extra keyword args to pass to `subprocess.Popen`.
     :returns a tuple (returncode, stdout_data, stderr_data).
-
-    IMPORTANT NOTE: The subprocess will be run with --no-lock, so that it doesn't deadlock waiting
-    for this process to release the workspace lock. It's the caller's responsibility to ensure
-    that the invoked pants doesn't interact badly with this one.
     """
-
-    with temporary_dir(root_dir=self.workdir_root()) as workdir:
+    with self.temporary_workdir() as workdir:
       return self.run_pants_with_workdir(command, workdir, config, stdin_data, extra_env, **kwargs)
 
-  def bundle_and_run(self, target, bundle_name, args=None):
-    ''' Creates the bundle with pants, then does java -jar {bundle_name}.jar to execute the bundle.
+  @contextmanager
+  def pants_results(self, command, config=None, stdin_data=None, extra_env=None, **kwargs):
+    """Similar to run_pants in that it runs pants in a subprocess, but yields in order to give
+    callers a chance to do any necessary validations on the workdir.
+
+    :param list command: A list of command line arguments coming after `./pants`.
+    :param config: Optional data for a generated ini file. A map of <section-name> ->
+    map of key -> value. If order in the ini file matters, this should be an OrderedDict.
+    :param kwargs: Extra keyword args to pass to `subprocess.Popen`.
+    :returns a tuple (returncode, stdout_data, stderr_data).
+    """
+    with self.temporary_workdir() as workdir:
+      yield self.run_pants_with_workdir(command, workdir, config, stdin_data, extra_env, **kwargs)
+
+  def bundle_and_run(self, target, bundle_name, bundle_options=None, args=None,
+                     expected_bundle_jar_content=None,
+                     expected_bundle_content=None,
+                     library_jars_are_symlinks=True):
+    """Creates the bundle with pants, then does java -jar {bundle_name}.jar to execute the bundle.
+
     :param target: target name to compile
     :param bundle_name: resulting bundle filename (minus .jar extension)
+    :param bundle_options: additional options for bundle
     :param args: optional arguments to pass to executable
+    :param expected_bundle_content: verify the bundle zip content
+    :param expected_bundle_jar_content: verify the bundle jar content
+    :param library_jars_are_symlinks: verify library jars are symlinks if True, and actual
+      files if False. Default `True` because we always create symlinks for both external and internal
+      dependencies, only exception is when shading is used.
     :return: stdout as a string on success, raises an Exception on error
-    '''
-    pants_run = self.run_pants(['goal', 'bundle', '--bundle-archive=zip', target])
-    self.assertEquals(pants_run.returncode, self.PANTS_SUCCESS_CODE,
-                      "goal bundle expected success, got {0}\n"
-                      "got stderr:\n{1}\n"
-                      "got stdout:\n{2}\n".format(pants_run.returncode,
-                                                  pants_run.stderr_data,
-                                                  pants_run.stdout_data))
+    """
+    bundle_options = bundle_options or []
+    bundle_options = ['bundle.jvm'] + bundle_options + ['--archive=zip', target]
+    pants_run = self.run_pants(bundle_options)
+    self.assert_success(pants_run)
 
+    self.assertTrue(check_symlinks('dist/{bundle_name}-bundle/libs'.format(bundle_name=bundle_name),
+                                   library_jars_are_symlinks))
     # TODO(John Sirois): We need a zip here to suck in external library classpath elements
     # pointed to by symlinks in the run_pants ephemeral tmpdir.  Switch run_pants to be a
     # contextmanager that yields its results while the tmpdir workdir is still active and change
     # this test back to using an un-archived bundle.
     with temporary_dir() as workdir:
       ZIP.extract('dist/{bundle_name}.zip'.format(bundle_name=bundle_name), workdir)
+      if expected_bundle_content:
+        self.assertTrue(contains_exact_files(workdir, expected_bundle_content))
+      if expected_bundle_jar_content:
+        with temporary_dir() as check_bundle_jar_dir:
+          bundle_jar = os.path.join(workdir, '{bundle_name}.jar')
+          ZIP.extract('{workdir}/{bundle_name}.jar'.format(workdir=workdir,
+                                                           bundle_name=bundle_name),
+                      check_bundle_jar_dir)
+          self.assertTrue(contains_exact_files(check_bundle_jar_dir, expected_bundle_jar_content))
+
       optional_args = []
       if args:
         optional_args = args
@@ -133,11 +224,9 @@ class PantsRunIntegrationTest(unittest.TestCase):
     return stdout
 
   def assert_success(self, pants_run, msg=None):
-    # TODO(John Sirois): de-dup ITs to use this helper
     self.assert_result(pants_run, self.PANTS_SUCCESS_CODE, expected=True, msg=msg)
 
   def assert_failure(self, pants_run, msg=None):
-    # TODO(John Sirois): de-dup ITs to use this helper
     self.assert_result(pants_run, self.PANTS_SUCCESS_CODE, expected=False, msg=msg)
 
   def assert_result(self, pants_run, value, expected=True, msg=None):
@@ -159,3 +248,7 @@ class PantsRunIntegrationTest(unittest.TestCase):
     error_msg = '\n'.join(details)
 
     assertion(value, pants_run.returncode, error_msg)
+
+  def normalize(self, s):
+    """Removes escape sequences (e.g. colored output) and all whitespace from string s."""
+    return ''.join(strip_color(s).split())

@@ -2,30 +2,39 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-import argparse
 import inspect
 import re
+from collections import OrderedDict
 
 from docutils.core import publish_parts
-from twitter.common.collections.ordereddict import OrderedDict
+from six import string_types
+from six.moves import range
 
+from pants.base.build_environment import get_buildroot
 from pants.base.build_manual import get_builddict_info
-from pants.base.config import Config
 from pants.base.exceptions import TaskError
 from pants.base.generator import TemplateData
-from pants.base.target import Target
+from pants.build_graph.target import Target
 from pants.goal.goal import Goal
-from pants.option.options_bootstrapper import OptionsBootstrapper, register_bootstrap_options
-from pants.option.options import Options
-from pants.option.global_options import register_global_options
-from pants.option.parser import Parser
+from pants.help.help_info_extracter import HelpInfoExtracter
+from pants.option.arg_splitter import GLOBAL_SCOPE
+from pants.option.options_bootstrapper import OptionsBootstrapper
+
+
+# TODO(benjy): Rewrite this to handle subsystem options, and recursive/advanced options.
+# Ideally the latter would be expandable or linked or something, so there's not a ton of clutter.
+# Also make this code better (at least wrap it in a class and give the methods comprehensible
+# names), and make its output prettier and more dynamic.
+# This might make a good documentation hack week project for someone.
+
+
+buildroot = get_buildroot()
 
 
 # Our CLI help and doc-website-gen use this to get useful help text.
-
 def indent_docstring_by_n(s, n=1):
   """Given a non-empty docstring, return version indented N spaces.
   Given an empty thing, return the thing itself."""
@@ -317,6 +326,7 @@ def info_for_target_class(cls):
   paramdocs = param_docshards_to_template_datas(funcdoc_shards)
   return(argspec, funcdoc_rst, paramdocs)
 
+
 def entry_for_one_class(nom, cls):
   """  Generate a BUILD dictionary entry for a class.
   nom: name like 'python_binary'
@@ -365,15 +375,11 @@ def entry_for_one(nom, sym):
   if inspect.ismethod(sym) or inspect.isfunction(sym):
     return entry_for_one_func(nom, sym)
   return msg_entry(nom,
-                   "TODO! no doc gen for %s %s" % (str(type(sym)), str(sym)),
-                   "TODO! no doc gen for %s %s" % (str(type(sym)), str(sym)))
+                   "TODO! no doc gen for {} {}".format(str(type(sym)), str(sym)),
+                   "TODO! no doc gen for {} {}".format(str(type(sym)), str(sym)))
 
 
 PREDEFS = {  # some hardwired entries
-  'dependencies': {'defn':
-                     msg_entry('dependencies',
-                               'Old name for `target`_',
-                               'Old name for <a href="#target">target</a>')},
   'egg': {'defn': msg_entry('egg',
                             'In older Pants, loads a pre-built Python egg '
                             'from file system. Undefined in newer Pants.',
@@ -390,16 +396,6 @@ PREDEFS = {  # some hardwired entries
                         """In old Pants versions, a reference to a Pants targets.
                         (In new Pants versions, just use strings.)""")},
   'python_artifact': {'suppress': True},  # unused alias for PythonArtifact
-  'python_test_suite': {'defn':
-                          msg_entry('python_test_suite',
-                                    'Deprecated way to group Python tests;'
-                                    ' use `target`_',
-                                    'Deprecated way to group Python tests;'
-                                    ' use <a href="#target">target</a>')},
-  'scala_tests': {'defn':
-                    msg_entry('scala_tests',
-                              'Old name for `scala_specs`_',
-                              'Old name for <a href="#scala_specs">scala_specs</a>')},
 }
 
 
@@ -414,92 +410,86 @@ def get_syms(build_file_parser):
         syms[sym] = item
 
   aliases = build_file_parser.registered_aliases()
-  map_symbols(aliases.targets)
+  map_symbols(aliases.target_types)
+
+  # TODO(John Sirois): Handle mapping the `Macro.expand` arguments - these are the real arguments
+  # to document and may be different than the set gathered from walking the Target hierarchy.
+  for alias, target_macro_factory in aliases.target_macro_factories.items():
+    for target_type in target_macro_factory.target_types:
+      map_symbols({alias: target_type})
+
   map_symbols(aliases.objects)
   map_symbols(aliases.context_aware_object_factories)
   return syms
 
 
 def bootstrap_option_values():
-  try:
-    return OptionsBootstrapper(buildroot='<buildroot>').get_bootstrap_options().for_global_scope()
-  finally:
-    # Today, the OptionsBootstrapper mutates global state upon construction in the form of:
-    #  Config.reset_default_bootstrap_option_values(...)
-    # As such bootstrap options that use the buildroot get contaminated globally here.  We only
-    # need the contaminated values locally though for doc display, thus the reset of global state.
-    # TODO(John Sirois): remove this hack when mutable Config._defaults is killed.
-    Config.reset_default_bootstrap_option_values()
+  return OptionsBootstrapper().get_bootstrap_options().for_global_scope()
 
 
-def gen_goals_glopts_reference_data():
-  option_parser = Parser(env={}, config={}, scope='', parent_parser=None)
-  def register(*args, **kwargs):
-    option_parser.register(*args, **kwargs)
-  register.bootstrap = bootstrap_option_values()
-  register_bootstrap_options(register, buildroot='<buildroot>')
-  register_global_options(register)
-  argparser = option_parser._help_argparser
-  return gref_template_data_from_options(Options.GLOBAL_SCOPE, argparser)
+def gen_glopts_reference_data(options):
+  parser = options.get_parser(GLOBAL_SCOPE)
+  oschi = HelpInfoExtracter.get_option_scope_help_info_from_parser(parser)
+  return oref_template_data_from_help_info(oschi)
 
 
-def gref_template_data_from_options(scope, argparser):
-  """Get data for the Goals Reference from a CustomArgumentParser instance."""
-  if not argparser: return None
-  title = scope or ''
+def oref_template_data_from_help_info(oschi):
+  """Get data for the Options Reference from an OptionScopeHelpInfo instance."""
+  def sub_buildroot(s):
+    if isinstance(s, string_types):
+      return s.replace(buildroot, '<buildroot>')
+    else:
+      return s
+
+  title = oschi.scope
   pantsref = ''.join([c for c in title if c.isalnum()])
   option_l = []
-  for o in argparser.walk_actions():
-    st = '/'.join(o.option_strings)
-    # Argparse elides the type in various circumstances, so we have to reverse that logic here.
-    typ = o.type or (type(o.const) if isinstance(o, argparse._StoreConstAction) else str)
-    default = None
-    if o.default and not str(o.default).startswith("('NO',"):
-      default = o.default
+  for ohi in oschi.basic:
+    st = '/'.join(ohi.display_args)
     hlp = None
-    if o.help:
-      hlp = indent_docstring_by_n(o.help, 6)
+    if ohi.help:
+      hlp = indent_docstring_by_n(sub_buildroot(ohi.help), 6)
     option_l.append(TemplateData(
-        st=st,
-        default=default,
-        hlp=hlp,
-        typ=typ.__name__))
+      st=st,
+      fromfile=ohi.fromfile,
+      default=sub_buildroot(ohi.default),
+      hlp=hlp,
+      choices=ohi.choices,
+      typ=ohi.typ.__name__))
   return TemplateData(
     title=title,
     options=option_l,
     pantsref=pantsref)
 
 
-def gen_tasks_goals_reference_data():
-  """Generate the template data for the goals reference rst doc."""
+def gen_tasks_options_reference_data(options):
+  """Generate the template data for the options reference rst doc."""
   goal_dict = {}
   goal_names = []
+
+  def fill_template(options, task_type):
+    for authored_task_type in task_type.mro():
+      if authored_task_type.__module__ != 'abc':
+        break
+    doc_rst = indent_docstring_by_n(authored_task_type.__doc__ or '', 2)
+    doc_html = rst_to_html(dedent_docstring(authored_task_type.__doc__))
+    parser = options.get_parser(task_type.options_scope)
+    oschi = HelpInfoExtracter.get_option_scope_help_info_from_parser(parser)
+    impl = '{0}.{1}'.format(authored_task_type.__module__, authored_task_type.__name__)
+    return TemplateData(
+      impl=impl,
+      doc_html=doc_html,
+      doc_rst=doc_rst,
+      ogroup=oref_template_data_from_help_info(oschi))
+
   for goal in Goal.all():
-    tasks = []
-    for task_name in goal.ordered_task_names():
-      task_type = goal.task_type_by_name(task_name)
-      doc_rst = indent_docstring_by_n(task_type.__doc__ or '', 2)
-      doc_html = rst_to_html(dedent_docstring(task_type.__doc__))
-      option_parser = Parser(env={}, config={}, scope='', parent_parser=None)
-      def register(*args, **kwargs):
-        option_parser.register(*args, **kwargs)
-      register.bootstrap = bootstrap_option_values()
-      task_type.register_options(register)
-      argparser = option_parser._help_argparser
-      scope = Goal.scope(goal.name, task_name)
+    tasks = {}
+    for task_name, task_type in goal.task_items():
       # task_type may actually be a synthetic subclass of the authored class from the source code.
-      # We want to display the authored class's name in the docs (but note that we must use the
-      # subclass for registering options above)
-      for authored_task_type in task_type.mro():
-        if authored_task_type.__module__ != 'abc':
-          break
-      impl = '{0}.{1}'.format(authored_task_type.__module__, authored_task_type.__name__)
-      tasks.append(TemplateData(
-          impl=impl,
-          doc_html=doc_html,
-          doc_rst=doc_rst,
-          ogroup=gref_template_data_from_options(scope, argparser)))
-    goal_dict[goal.name] = TemplateData(goal=goal, tasks=tasks)
+      # We want to display the authored class's name in the docs.
+      tasks[task_name] = fill_template(options, task_type)
+    sorted_tasks = [ tasks[k] for k in sorted(tasks.keys()) ]
+    goal_dict[goal.name] = TemplateData(goal=goal, tasks=sorted_tasks)
     goal_names.append(goal.name)
 
   goals = [goal_dict[name] for name in sorted(goal_names, key=lambda x: x.lower())]

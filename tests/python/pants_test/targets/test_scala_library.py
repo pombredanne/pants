@@ -2,24 +2,24 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 from textwrap import dedent
 
 from pants.backend.jvm.targets.jar_dependency import JarDependency
 from pants.backend.jvm.targets.jar_library import JarLibrary
 from pants.backend.jvm.targets.java_library import JavaLibrary
+from pants.backend.jvm.targets.scala_jar_dependency import ScalaJarDependency
 from pants.backend.jvm.targets.scala_library import ScalaLibrary
-from pants.base.build_file_aliases import BuildFileAliases
-from pants.base.config import Config
+from pants.build_graph.build_file_aliases import BuildFileAliases
 from pants_test.base_test import BaseTest
 
 
 class ScalaLibraryTest(BaseTest):
   @property
   def alias_groups(self):
-    return BuildFileAliases.create(
+    return BuildFileAliases(
       targets={
         'scala_library': ScalaLibrary,
         'java_library': JavaLibrary,
@@ -27,30 +27,28 @@ class ScalaLibraryTest(BaseTest):
       },
       objects={
         'jar': JarDependency,
+        'scala_jar': ScalaJarDependency,
       }
     )
 
   def setUp(self):
     super(ScalaLibraryTest, self).setUp()
+    self.context(options={
+      'scala-platform': {
+        'runtime': []
+      }
+    })
 
-    self.create_file('pants.ini', dedent('''
-        [scala-compile]
-        runtime-deps: []
-        '''))
-
-    # TODO: Required because target code has no direct config reference. Remove after fixing that.
-    Config.cache(Config.load())
-
-    self.add_to_build_file('3rdparty', dedent('''
+    self.add_to_build_file('3rdparty', dedent("""
         jar_library(
           name='hub-and-spoke',
           jars=[
             jar('org.jalopy', 'hub-and-spoke', '0.0.1')
           ]
         )
-        '''))
+        """))
 
-    self.add_to_build_file('scala', dedent('''
+    self.add_to_build_file('scala', dedent("""
         scala_library(
           name='lib',
           sources=[],
@@ -59,9 +57,9 @@ class ScalaLibraryTest(BaseTest):
             'java:no_scala_dep',
           ]
         )
-        '''))
+        """))
 
-    self.add_to_build_file('java', dedent('''
+    self.add_to_build_file('java', dedent("""
         java_library(
           name='explicit_scala_dep',
           sources=[],
@@ -76,7 +74,7 @@ class ScalaLibraryTest(BaseTest):
           sources=[],
           dependencies=[]
         )
-        '''))
+        """))
 
     self.lib_hub_and_spoke = self.target('3rdparty:hub-and-spoke')
     self.scala_library = self.target('scala:lib')

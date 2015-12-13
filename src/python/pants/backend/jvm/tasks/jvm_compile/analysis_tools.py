@@ -2,26 +2,30 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import os
 import shutil
 
-from pants.base.build_environment import get_buildroot
 from pants.util.contextutil import temporary_dir
 
 
 class AnalysisTools(object):
   """Analysis manipulation methods required by JvmCompile."""
-  _IVY_HOME_PLACEHOLDER = '/_IVY_HOME_PLACEHOLDER'
-  _PANTS_HOME_PLACEHOLDER = '/_PANTS_HOME_PLACEHOLDER'
+  # Note: The value string isn't the same as the symbolic name for legacy reasons:
+  # We changed the name of the var, but didn't want to invalidate all cached artifacts just
+  # for that reason.
+  # TODO: If some future change requires us to invalidate all cached artifacts for some good reason
+  # (by bumping GLOBAL_CACHE_KEY_GEN_VERSION), we can use that opportunity to change this string.
+  _PANTS_BUILDROOT_PLACEHOLDER = b'/_PANTS_BUILDROOT_PLACEHOLDER'
+  _PANTS_WORKDIR_PLACEHOLDER = b'/_PANTS_WORKDIR_PLACEHOLDER'
 
-  def __init__(self, context, parser, analysis_cls):
+  def __init__(self, java_home, parser, analysis_cls, pants_buildroot, pants_workdir):
     self.parser = parser
-    self._java_home = context.java_home
-    self._ivy_home = context.ivy_home
-    self._pants_home = get_buildroot()
+    self._java_home = java_home
+    self._pants_buildroot = pants_buildroot.encode('utf-8')
+    self._pants_workdir = pants_workdir.encode('utf-8')
     self._analysis_cls = analysis_cls
 
   def split_to_paths(self, analysis_path, split_path_pairs, catchall_path=None):
@@ -48,9 +52,13 @@ class AnalysisTools(object):
     merged_analysis = self._analysis_cls.merge(analyses)
     merged_analysis.write_to_path(merged_analysis_path)
 
+  def rebase_from_path(self, infile_path, outfile_path, old_base, new_base):
+    self.parser.rebase_from_path(infile_path, outfile_path, old_base, new_base, java_home=None)
+
   def relativize(self, src_analysis, relativized_analysis):
     with temporary_dir() as tmp_analysis_dir:
-      tmp_analysis_file = os.path.join(tmp_analysis_dir, 'analysis.relativized')
+      tmp_analysis_file1 = os.path.join(tmp_analysis_dir, 'analysis.relativized.1')
+      tmp_analysis_file2 = os.path.join(tmp_analysis_dir, 'analysis.relativized.2')
 
       # NOTE: We can't port references to deps on the Java home. This is because different JVM
       # implementations on different systems have different structures, and there's not
@@ -59,31 +67,27 @@ class AnalysisTools(object):
       #
       # In practice the JVM changes rarely, and it should be fine to require a full rebuild
       # in those rare cases.
-      rebasings = [
-        (self._java_home, None),
-        (self._ivy_home, self._IVY_HOME_PLACEHOLDER),
-        (self._pants_home, self._PANTS_HOME_PLACEHOLDER),
-        ]
       # Work on a tmpfile, for safety.
-      self._rebase_from_path(src_analysis, tmp_analysis_file, rebasings)
-      shutil.move(tmp_analysis_file, relativized_analysis)
+      # Start with rebasing working directory,
+      # because build root cannot be subdirectory of working directory.
+      # TODO: Change to one call to zincutils when API will be made: https://github.com/pantsbuild/zincutils/issues/8.
+      self.parser.rebase_from_path(src_analysis, tmp_analysis_file1,
+                                   self._pants_workdir, self._PANTS_WORKDIR_PLACEHOLDER, self._java_home)
+      self.parser.rebase_from_path(tmp_analysis_file1, tmp_analysis_file2,
+                                   self._pants_buildroot, self._PANTS_BUILDROOT_PLACEHOLDER, self._java_home)
+
+      shutil.move(tmp_analysis_file2, relativized_analysis)
 
   def localize(self, src_analysis, localized_analysis):
     with temporary_dir() as tmp_analysis_dir:
-      tmp_analysis_file = os.path.join(tmp_analysis_dir, 'analysis')
-      rebasings = [
-        (AnalysisTools._IVY_HOME_PLACEHOLDER, self._ivy_home),
-        (AnalysisTools._PANTS_HOME_PLACEHOLDER, self._pants_home),
-        ]
+      tmp_analysis_file1 = os.path.join(tmp_analysis_dir, 'analysis.1')
+      tmp_analysis_file2 = os.path.join(tmp_analysis_dir, 'analysys.2')
+
       # Work on a tmpfile, for safety.
-      self._rebase_from_path(src_analysis, tmp_analysis_file, rebasings)
-      shutil.move(tmp_analysis_file, localized_analysis)
+      # TODO: Change to one call to zincutils when API will be made: https://github.com/pantsbuild/zincutils/issues/8.
+      self.parser.rebase_from_path(src_analysis, tmp_analysis_file1,
+                                   self._PANTS_WORKDIR_PLACEHOLDER, self._pants_workdir)
+      self.parser.rebase_from_path(tmp_analysis_file1, tmp_analysis_file2,
+                                   self._PANTS_BUILDROOT_PLACEHOLDER, self._pants_buildroot)
 
-  def _rebase_from_path(self, input_analysis_path, output_analysis_path, rebasings):
-    """Rebase file paths in an analysis file.
-
-    rebasings: A list of path prefix pairs [from_prefix, to_prefix] to rewrite.
-               to_prefix may be None, in which case matching paths are removed entirely.
-    """
-    analysis = self.parser.parse_from_path(input_analysis_path)
-    analysis.write_to_path(output_analysis_path, rebasings=rebasings)
+      shutil.move(tmp_analysis_file2, localized_analysis)

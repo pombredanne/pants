@@ -2,8 +2,8 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import logging
 import urlparse
@@ -11,10 +11,9 @@ import urlparse
 import requests
 from requests import RequestException
 
-from pants.cache.artifact import TarballArtifact
-from pants.cache.artifact_cache import ArtifactCache, ArtifactCacheError, NonfatalArtifactCacheError, UnreadableArtifact
-from pants.cache.local_artifact_cache import TempLocalArtifactCache
-from pants.util.contextutil import temporary_dir, temporary_file, temporary_file_path
+from pants.cache.artifact_cache import (ArtifactCache, ArtifactCacheError,
+                                        NonfatalArtifactCacheError, UnreadableArtifact)
+
 
 logger = logging.getLogger(__name__)
 
@@ -22,17 +21,21 @@ logger = logging.getLogger(__name__)
 # TODO do this in a central place
 logging.getLogger('requests').setLevel(logging.WARNING)
 
+
 class InvalidRESTfulCacheProtoError(ArtifactCacheError):
   """Indicates an invalid protocol used in a remote spec."""
   pass
 
+
 class RequestsSession(object):
   _session = None
+
   @classmethod
   def instance(cls):
     if cls._session is None:
       cls._session = requests.Session()
     return cls._session
+
 
 class RESTfulArtifactCache(ArtifactCache):
   """An artifact cache that stores the artifacts on a RESTful service."""
@@ -41,9 +44,9 @@ class RESTfulArtifactCache(ArtifactCache):
 
   def __init__(self, artifact_root, url_base, local):
     """
-    :param str artifact_root: The path under which cacheable products will be read/written.
-    :param str url_base: The prefix for urls on some RESTful service. We must be able to PUT and GET to any
-              path under this base.
+    :param string artifact_root: The path under which cacheable products will be read/written.
+    :param string url_base: The prefix for urls on some RESTful service. We must be able to PUT and
+                            GET to any path under this base.
     :param BaseLocalArtifactCache local: local cache instance for storing and creating artifacts
     """
     super(RESTfulArtifactCache, self).__init__(artifact_root)
@@ -75,9 +78,9 @@ class RESTfulArtifactCache(ArtifactCache):
       return True
     return self._request('HEAD', self._remote_path_for_key(cache_key)) is not None
 
-  def use_cached_files(self, cache_key):
+  def use_cached_files(self, cache_key, results_dir=None):
     if self._localcache.has(cache_key):
-      return self._localcache.use_cached_files(cache_key)
+      return self._localcache.use_cached_files(cache_key, results_dir)
 
     remote_path = self._remote_path_for_key(cache_key)
     try:
@@ -85,9 +88,10 @@ class RESTfulArtifactCache(ArtifactCache):
       if response is not None:
         # Delegate storage and extraction to local cache
         byte_iter = response.iter_content(self.READ_SIZE_BYTES)
-        return self._localcache.store_and_use_artifact(cache_key, byte_iter)
+        return self._localcache.store_and_use_artifact(cache_key, byte_iter, results_dir)
     except Exception as e:
       logger.warn('\nError while reading from remote artifact cache: {0}\n'.format(e))
+      # TODO(peiyu): clean up partially downloaded local file if any
       return UnreadableArtifact(cache_key, e)
 
     return False
@@ -108,7 +112,6 @@ class RESTfulArtifactCache(ArtifactCache):
     session = RequestsSession.instance()
 
     try:
-      response = None
       if 'PUT' == method:
         response = session.put(url, data=body, timeout=self._timeout_secs)
       elif 'GET' == method:

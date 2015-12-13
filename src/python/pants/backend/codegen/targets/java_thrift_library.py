@@ -2,48 +2,22 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 from pants.backend.jvm.targets.jvm_target import JvmTarget
-from pants.base.config import Config
 from pants.base.exceptions import TargetDefinitionException
 
 
 class JavaThriftLibrary(JvmTarget):
-  """Generates a stub Java or Scala library from thrift IDL files."""
-
-  class Defaults(object):
-    @staticmethod
-    def _check_java_thrift_library(target):
-      if not isinstance(target, JavaThriftLibrary):
-        raise ValueError('Expected a JavaThriftLibrary, got: %s of type %s' % (target, type(target)))
-
-    def __init__(self, config=None):
-      self._config = config or Config.from_cache()
-
-    def _get_default(self, key, fallback):
-      return self._config.get('java-thrift-library', key, default=fallback)
-
-    def get_compiler(self, target):
-      self._check_java_thrift_library(target)
-      return target.compiler or self._get_default('compiler', 'thrift')
-
-    def get_language(self, target):
-      self._check_java_thrift_library(target)
-      return target.language or self._get_default('language', 'java')
-
-    def get_rpc_style(self, target):
-      self._check_java_thrift_library(target)
-      return target.rpc_style or self._get_default('rpc_style', 'sync')
-
+  """A Java library generated from Thrift IDL files."""
 
   # TODO(John Sirois): Tasks should register the values they support in a plugin-registration goal.
   # In general a plugin will contribute a target and a task, but in this case we have a shared
   # target that can be used by at least 2 tasks - ThriftGen and ScroogeGen.  This is likely not
   # uncommon (gcc & clang) so the arrangement needs to be cleaned up and supported well.
   _COMPILERS = frozenset(['thrift', 'scrooge'])
-  _LANGUAGES = frozenset(['java', 'scala'])
+  _LANGUAGES = frozenset(['java', 'scala', 'android'])
   _RPC_STYLES = frozenset(['sync', 'finagle', 'ostrich'])
 
   def __init__(self,
@@ -54,32 +28,49 @@ class JavaThriftLibrary(JvmTarget):
                thrift_linter_strict=None,
                **kwargs):
     """
-    :param compiler: The compiler used to compile the thrift files; default is 'thrift'
-      (The apache thrift compiler).
-    :param language: The language used to generate the output files; defaults to 'java'.
-    :param rpc_style: An optional rpc style to generate service stubs with.
+    :param compiler: The compiler used to compile the thrift files. The default is defined in
+      the global options under ``--thrift-default-compiler``.
+    :param language: The language used to generate the output files. The default is defined in
+      the global options under ``--thrift-default-language``.
+    :param rpc_style: An optional rpc style to generate service stubs with. The default is defined
+      in the global options under ``--thrift-default-rpc-style``.
     :param namespace_map: An optional dictionary of namespaces to remap {old: new}
     :param thrift_linter_strict: If True, fail if thrift linter produces any warnings.
     """
 
     super(JavaThriftLibrary, self).__init__(**kwargs)
 
+    # TODO(Eric Ayers) As of 2/5/2015 this call is DEPRECATED and should be removed soon
     self.add_labels('codegen')
 
     def check_value_for_arg(arg, value, values):
-      if value is not None and value not in values:
-        raise TargetDefinitionException(self, "%s may only be set to %s ('%s' not valid)" %
-                                        (arg, ', or '.join(map(repr, values)), value))
+      if value and value not in values:
+        raise TargetDefinitionException(self, "{} may only be set to {} ('{}' not valid)"
+                                        .format(arg, ', or '.join(map(repr, values)), value))
       return value
 
-    # TODO(pl): These should all live in payload fields
-    self.compiler = check_value_for_arg('compiler', compiler, self._COMPILERS)
-    self.language = check_value_for_arg('language', language, self._LANGUAGES)
-    self.rpc_style = check_value_for_arg('rpc_style', rpc_style, self._RPC_STYLES)
+    # The following fields are only added to the fingerprint via FingerprintStrategy when their
+    # values impact the outcome of the task.  See JavaThriftLibraryFingerprintStrategy.
+    self._compiler = check_value_for_arg('compiler', compiler, self._COMPILERS)
+    self._language = check_value_for_arg('language', language, self._LANGUAGES)
+    self._rpc_style = check_value_for_arg('rpc_style', rpc_style, self._RPC_STYLES)
 
     self.namespace_map = namespace_map
     self.thrift_linter_strict = thrift_linter_strict
 
+  @property
+  def compiler(self):
+    return self._compiler
+
+  @property
+  def language(self):
+    return self._language
+
+  @property
+  def rpc_style(self):
+    return self._rpc_style
+
+  # TODO(Eric Ayers) As of 2/5/2015 this call is DEPRECATED and should be removed soon
   @property
   def is_thrift(self):
     return True

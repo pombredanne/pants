@@ -2,28 +2,98 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import os
 from collections import defaultdict
 
+import six
 from twitter.common.collections import OrderedSet
+
+from pants.util.dirutil import fast_relpath
+
+
+class ProductError(Exception): pass
+
+
+class UnionProducts(object):
+  """Here, products for a target are an insertion ordered set.
+
+  When products for multiple targets are requested, an ordered union is provided.
+  """
+
+  def __init__(self, products_by_target=None):
+    # A map of target to OrderedSet of product members.
+    self._products_by_target = products_by_target or defaultdict(OrderedSet)
+
+  def copy(self):
+    """Returns a copy of this UnionProducts.
+
+    Edits to the copy's mappings will not affect the product mappings in the original.
+    The copy is shallow though, so edits to the the copy's product values will mutate the original's
+    product values.
+
+    :rtype: :class:`UnionProducts`
+    """
+    products_by_target = defaultdict(OrderedSet)
+    for key, value in self._products_by_target.items():
+      products_by_target[key] = OrderedSet(value)
+    return UnionProducts(products_by_target=products_by_target)
+
+  def add_for_target(self, target, products):
+    """Updates the products for a particular target, adding to existing entries."""
+    self._products_by_target[target].update(products)
+
+  def add_for_targets(self, targets, products):
+    """Updates the products for the given targets, adding to existing entries."""
+    # FIXME: This is a temporary helper for use until the classpath has been split.
+    for target in targets:
+      self.add_for_target(target, products)
+
+  def remove_for_target(self, target, products):
+    """Updates the products for a particular target, removing the given existing entries."""
+    for product in products:
+      self._products_by_target[target].discard(product)
+
+  def get_for_target(self, target):
+    """Gets the products for the given target."""
+    return self.get_for_targets([target])
+
+  def get_for_targets(self, targets):
+    """Gets the union of the products for the given targets, preserving the input order."""
+    products = OrderedSet()
+    for target in targets:
+      products.update(self._products_by_target[target])
+    return products
+
+  def target_for_product(self, product):
+    """Looks up the target key for a product.
+
+    :param product: The product to search for
+    :return: None if there is no target for the product
+    """
+    for target, products in self._products_by_target.items():
+      if product in products:
+        return target
+    return None
+
+  def __str__(self):
+    return "UnionProducts({})".format(self._products_by_target)
 
 
 class RootedProducts(object):
-  """Products of a build that have a concept of a 'root' directory.
+  """File products of a build that have a concept of a 'root' directory.
 
   E.g., classfiles, under a root package directory."""
+
   def __init__(self, root):
     self._root = root
     self._rel_paths = OrderedSet()
 
   def add_abs_paths(self, abs_paths):
     for abs_path in abs_paths:
-      if not abs_path.startswith(self._root):
-        raise Exception('%s is not under %s' % (abs_path, self._root))
-      self._rel_paths.add(os.path.relpath(abs_path, self._root))
+      self._rel_paths.add(fast_relpath(abs_path, self._root))
 
   def add_rel_paths(self, rel_paths):
     self._rel_paths.update(rel_paths)
@@ -38,9 +108,15 @@ class RootedProducts(object):
     for relpath in self._rel_paths:
       yield os.path.join(self._root, relpath)
 
+  def __bool__(self):
+    return self._rel_paths
+
+  __nonzero__ = __bool__
+
 
 class MultipleRootedProducts(object):
-  """A product consisting of multiple roots, with associated products."""
+  """A product consisting of multiple roots, with associated file products."""
+
   def __init__(self):
     self._rooted_products_by_root = {}
 
@@ -61,6 +137,18 @@ class MultipleRootedProducts(object):
   def _get_products_for_root(self, root):
     return self._rooted_products_by_root.setdefault(root, RootedProducts(root))
 
+  def __bool__(self):
+    """Return True if any of the roots contains products"""
+    for root, products in self.rel_paths():
+      if products:
+        return True
+    return False
+
+  __nonzero__ = __bool__
+
+  def __str__(self):
+    return "MultipleRootedProducts({})".format(self._rooted_products_by_root)
+
 
 class Products(object):
   """An out-of-band 'dropbox' where tasks can place build product information for later tasks to use.
@@ -77,7 +165,7 @@ class Products(object):
 
   Right now this class is in an intermediate stage, as we transition to a more robust Products concept.
   The abuses have been switched to use 'data_products' (see below) which is just a dictionary
-  of product type (e.g., 'classes_by_target') to arbitrary payload. That payload can be anything,
+  of product type (e.g., 'classes_by_source') to arbitrary payload. That payload can be anything,
   but the MultipleRootedProducts class is useful for products that do happen to fit into the
   (basedir, [files-under-basedir]) paradigm.
 
@@ -137,7 +225,7 @@ class Products(object):
         Returns an iterable over all pairs (target, product) in this mapping.
         Each product is itself a map of <basedir> -> <products list>.
       """
-      return self.by_target.iteritems()
+      return six.iteritems(self.by_target)
 
     def keys_for(self, basedir, product):
       """Returns the set of keys the given mapped product is registered under."""
@@ -150,57 +238,55 @@ class Products(object):
       return keys
 
     def __repr__(self):
-      return 'ProductMapping(%s) {\n  %s\n}' % (self.typename, '\n  '.join(
-        '%s => %s\n    %s' % (str(target), basedir, outputs)
-                              for target, outputs_by_basedir in self.by_target.items()
-                              for basedir, outputs in outputs_by_basedir.items()))
+      return 'ProductMapping({}) {{\n  {}\n}}'.format(self.typename, '\n  '.join(
+          '{} => {}\n    {}'.format(str(target), basedir, outputs)
+          for target, outputs_by_basedir in self.by_target.items()
+          for basedir, outputs in outputs_by_basedir.items()))
+
+    def __bool__(self):
+      return not self.empty()
+
+    __nonzero__ = __bool__
 
   def __init__(self):
+    # TODO(John Sirois): Kill products and simply have users register ProductMapping subtypes
+    # as data products.  Will require a class factory, like `ProductMapping.named(typename)`.
     self.products = {}  # type -> ProductMapping instance.
-    self.predicates_for_type = defaultdict(list)
+    self.required_products = set()
 
     self.data_products = {}  # type -> arbitrary object.
     self.required_data_products = set()
 
-  def require(self, typename, predicate=None):
+  def require(self, typename):
     """Registers a requirement that file products of the given type by mapped.
 
-    If a target predicate is supplied, only targets matching the predicate are mapped.
+    :param typename: the type or other key of a product mapping that should be generated.
     """
-    if predicate:
-      self.predicates_for_type[typename].append(predicate)
-    return self.products.setdefault(typename, Products.ProductMapping(typename))
+    self.required_products.add(typename)
 
   def isrequired(self, typename):
-    """Returns a predicate that selects targets required for the given type if mappings are required.
-
-    Otherwise returns None.
-    """
-    if typename not in self.products:
-      return None
-    def combine(first, second):
-      return lambda target: first(target) or second(target)
-    return reduce(combine, self.predicates_for_type[typename], lambda target: False)
+    """Checks if a particular product is required by any tasks."""
+    return typename in self.required_products
 
   def get(self, typename):
     """Returns a ProductMapping for the given type name."""
-    return self.require(typename)
+    return self.products.setdefault(typename, Products.ProductMapping(typename))
 
   def require_data(self, typename):
-    """ Registers a requirement that data produced by tasks is required.
+    """Registers a requirement that data produced by tasks is required.
 
-    typename: the name of a data product that should be generated.
+    :param typename: the type or other key of a data product that should be generated.
     """
     self.required_data_products.add(typename)
 
   def is_required_data(self, typename):
-    """ Checks if a particular data product is required by any tasks."""
+    """Checks if a particular data product is required by any tasks."""
     return typename in self.required_data_products
 
   def safe_create_data(self, typename, init_func):
     """Ensures that a data item is created if it doesn't already exist."""
     # Basically just an alias for readability.
-    self.get_data(typename, init_func)
+    return self.get_data(typename, init_func)
 
   def get_data(self, typename, init_func=None):
     """ Returns a data product.
@@ -212,3 +298,23 @@ class Products(object):
         return None
       self.data_products[typename] = init_func()
     return self.data_products.get(typename)
+
+  def get_only(self, product_type, target):
+    """If there is exactly one product for the given product type and target, returns the
+    full filepath of said product.
+
+    Otherwise, raises a ProductError.
+
+    Useful for retrieving the filepath for the executable of a binary target.
+    """
+    product_mapping = self.get(product_type).get(target)
+    if len(product_mapping) != 1:
+      raise ProductError('{} directories in product mapping: requires exactly 1.'
+                         .format(len(product_mapping)))
+
+    for _, files in product_mapping.items():
+      if len(files) != 1:
+        raise ProductError('{} files in target directory: requires exactly 1.'
+                           .format(len(files)))
+
+      return files[0]

@@ -2,8 +2,8 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 
 class Analysis(object):
@@ -12,6 +12,7 @@ class Analysis(object):
   An analysis provides information on the src -> class product mappings
   and on the src -> {src|class|jar} file dependency mappings.
   """
+
   @classmethod
   def merge(cls, analyses):
     """Merge multiple analysis instances into one."""
@@ -26,14 +27,10 @@ class Analysis(object):
     """
     raise NotImplementedError()
 
-  def write_to_path(self, outfile_path, rebasings=None):
+  def write_to_path(self, outfile_path):
     with open(outfile_path, 'w') as outfile:
-      self.write(outfile, rebasings)
+      self.write(outfile)
 
-  def write(self, outfile, rebasings=None):
-    """Write this Analysis to outfile.
-
-    rebasings: A list of path prefix pairs [from_prefix, to_prefix] to rewrite.
-               to_prefix may be None, in which case matching paths are removed entirely.
-    """
+  def write(self, outfile):
+    """Write this Analysis to outfile."""
     raise NotImplementedError()

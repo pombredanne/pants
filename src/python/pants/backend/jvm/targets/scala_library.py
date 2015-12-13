@@ -2,17 +2,17 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from pants.backend.jvm.scala.target_platform import TargetPlatform
+from pants.backend.jvm.subsystems.scala_platform import ScalaPlatform
 from pants.backend.jvm.targets.exportable_jvm_library import ExportableJvmLibrary
-from pants.base.address import SyntheticAddress
 from pants.base.exceptions import TargetDefinitionException
+from pants.build_graph.address import Address
 
 
 class ScalaLibrary(ExportableJvmLibrary):
-  """A collection of Scala code.
+  """A Scala library.
 
   Normally has conceptually-related sources; invoking the ``compile`` goal
   on this target compiles scala and generates classes. Invoking the ``bundle``
@@ -20,6 +20,10 @@ class ScalaLibrary(ExportableJvmLibrary):
   Instead, a ``jvm_binary`` might depend on this library; that binary is a
   more sensible thing to bundle.
   """
+
+  @classmethod
+  def subsystems(cls):
+    return super(ScalaLibrary, cls).subsystems() + (ScalaPlatform, )
 
   def __init__(self, java_sources=None, **kwargs):
     """
@@ -33,7 +37,7 @@ class ScalaLibrary(ExportableJvmLibrary):
     :param resources: An optional list of paths (DEPRECATED) or ``resources``
       targets containing resources that belong on this library's classpath.
     """
-    self._java_sources_specs = self.assert_list(java_sources)
+    self._java_sources_specs = self.assert_list(java_sources, key_arg='java_sources')
     super(ScalaLibrary, self).__init__(**kwargs)
     self.add_labels('scala')
 
@@ -42,10 +46,9 @@ class ScalaLibrary(ExportableJvmLibrary):
     for spec in super(ScalaLibrary, self).traversable_dependency_specs:
       yield spec
 
-    # TODO(John Sirois): Targets should have a config plumbed as part of the implicit
-    # BuildFileParser injected context and that could be used to allow in general for targets with
-    # knobs and in particular an explict config arg to the TargetPlatform constructor below.
-    for library_spec in TargetPlatform().library_specs:
+    # TODO(John Sirois): Targets should be able to set their scala platform version
+    # explicitly, and not have to conform to this global setting.
+    for library_spec in ScalaPlatform.global_instance().runtime:
       yield library_spec
 
   @property
@@ -65,8 +68,8 @@ class ScalaLibrary(ExportableJvmLibrary):
   @property
   def java_sources(self):
     for spec in self._java_sources_specs:
-      address = SyntheticAddress.parse(spec, relative_to=self.address.spec_path)
+      address = Address.parse(spec, relative_to=self.address.spec_path)
       target = self._build_graph.get_target(address)
       if target is None:
-        raise TargetDefinitionException(self, 'No such java target: %s' % spec)
+        raise TargetDefinitionException(self, 'No such java target: {}'.format(spec))
       yield target

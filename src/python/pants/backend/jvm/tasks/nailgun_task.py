@@ -2,91 +2,93 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from abc import abstractproperty
 import os
 
+from pants.backend.jvm.targets.jar_dependency import JarDependency
 from pants.backend.jvm.tasks.jvm_tool_task_mixin import JvmToolTaskMixin
-from pants.backend.core.tasks.task import Task, TaskBase
 from pants.base.exceptions import TaskError
 from pants.java import util
-from pants.java.distribution.distribution import Distribution
+from pants.java.distribution.distribution import DistributionLocator
 from pants.java.executor import SubprocessExecutor
-from pants.java.nailgun_executor import NailgunExecutor
+from pants.java.nailgun_executor import NailgunExecutor, NailgunProcessGroup
+from pants.task.task import Task, TaskBase
 
 
-class NailgunTaskBase(TaskBase, JvmToolTaskMixin):
+class NailgunTaskBase(JvmToolTaskMixin, TaskBase):
+  ID_PREFIX = 'ng'
 
-  @staticmethod
-  def killall(logger=None, everywhere=False):
-    """Kills all nailgun servers launched by pants in the current repo.
+  @classmethod
+  def register_options(cls, register):
+    super(NailgunTaskBase, cls).register_options(register)
+    register('--use-nailgun', action='store_true', default=True,
+             help='Use nailgun to make repeated invocations of this task quicker.')
+    register('--nailgun-timeout-seconds', advanced=True, default=10,
+             help='Timeout (secs) for nailgun startup.')
+    register('--nailgun-connect-attempts', advanced=True, default=5,
+             help='Max attempts for nailgun connects.')
+    cls.register_jvm_tool(register,
+                          'nailgun-server',
+                          classpath=[
+                            JarDependency(org='com.martiansoftware',
+                                          name='nailgun-server',
+                                          rev='0.9.1'),
+                          ])
 
-    Returns ``True`` if all nailguns were successfully killed, ``False`` otherwise.
-
-    :param logger: a callable that accepts a message string describing the killed nailgun process
-    :param bool everywhere: ``True`` to kill all nailguns servers launched by pants on this machine
-    """
-    if not NailgunExecutor.killall:
-      return False
-    else:
-      return NailgunExecutor.killall(logger=logger, everywhere=everywhere)
+  @classmethod
+  def global_subsystems(cls):
+    return super(NailgunTaskBase, cls).global_subsystems() + (DistributionLocator,)
 
   def __init__(self, *args, **kwargs):
     super(NailgunTaskBase, self).__init__(*args, **kwargs)
-    self._executor_workdir = os.path.join(self.context.new_options.for_global_scope().pants_workdir,
-                                          'ng', self.__class__.__name__)
-    self._nailgun_bootstrap_key = 'nailgun'
-    self.register_jvm_tool(self._nailgun_bootstrap_key, ['//:nailgun-server'])
-    self.set_distribution()  # Use default until told otherwise.
+
+    id_tuple = (self.ID_PREFIX, self.__class__.__name__)
+
+    self._identity = '_'.join(id_tuple)
+    self._executor_workdir = os.path.join(self.context.options.for_global_scope().pants_workdir,
+                                          *id_tuple)
+    self.set_distribution()    # Use default until told otherwise.
     # TODO: Choose default distribution based on options.
 
   def set_distribution(self, minimum_version=None, maximum_version=None, jdk=False):
     try:
-      self._dist = Distribution.cached(minimum_version=minimum_version,
-                                       maximum_version=maximum_version, jdk=jdk)
-    except Distribution.Error as e:
+      self._dist = DistributionLocator.cached(minimum_version=minimum_version,
+                                              maximum_version=maximum_version, jdk=jdk)
+    except DistributionLocator.Error as e:
       raise TaskError(e)
-
-  @abstractproperty
-  def config_section(self):
-    """NailgunTask must be sub-classed to provide a config section name"""
-
-  @property
-  def nailgun_is_enabled(self):
-    return self.context.config.getbool(self.config_section, 'use_nailgun', default=True)
 
   def create_java_executor(self):
     """Create java executor that uses this task's ng daemon, if allowed.
 
     Call only in execute() or later. TODO: Enforce this.
     """
-    if self.nailgun_is_enabled and self.get_options().ng_daemons:
-      classpath = os.pathsep.join(self.tool_classpath(self._nailgun_bootstrap_key))
-      client = NailgunExecutor(self._executor_workdir, classpath, distribution=self._dist)
+    if self.get_options().use_nailgun:
+      classpath = os.pathsep.join(self.tool_classpath('nailgun-server'))
+      return NailgunExecutor(self._identity,
+                             self._executor_workdir,
+                             classpath,
+                             self._dist,
+                             connect_timeout=self.get_options().nailgun_timeout_seconds,
+                             connect_attempts=self.get_options().nailgun_connect_attempts)
     else:
-      client = SubprocessExecutor(self._dist)
-    return client
-
-  @property
-  def jvm_args(self):
-    """Default jvm args the nailgun will be launched with.
-
-    By default no special jvm args are used.  If a value for ``jvm_args`` is specified in pants.ini
-    globally in the ``DEFAULT`` section or in the ``nailgun`` section, then that list will be used.
-    """
-    return self.context.config.getlist('nailgun', 'jvm_args', default=[])
+      return SubprocessExecutor(self._dist)
 
   def runjava(self, classpath, main, jvm_options=None, args=None, workunit_name=None,
-              workunit_labels=None):
+              workunit_labels=None, workunit_log_config=None):
     """Runs the java main using the given classpath and args.
 
-    If --no-ng-daemons is specified then the java main is run in a freshly spawned subprocess,
+    If --no-use-nailgun is specified then the java main is run in a freshly spawned subprocess,
     otherwise a persistent nailgun server dedicated to this Task subclass is used to speed up
     amortized run times.
     """
     executor = self.create_java_executor()
+
+    # Creating synthetic jar to work around system arg length limit is not necessary
+    # when `NailgunExecutor` is used because args are passed through socket, therefore turning off
+    # creating synthetic jar if nailgun is used.
+    create_synthetic_jar = not self.get_options().use_nailgun
     try:
       return util.execute_java(classpath=classpath,
                                main=main,
@@ -95,18 +97,21 @@ class NailgunTaskBase(TaskBase, JvmToolTaskMixin):
                                executor=executor,
                                workunit_factory=self.context.new_workunit,
                                workunit_name=workunit_name,
-                               workunit_labels=workunit_labels)
+                               workunit_labels=workunit_labels,
+                               workunit_log_config=workunit_log_config,
+                               create_synthetic_jar=create_synthetic_jar,
+                               synthetic_jar_dir=self._executor_workdir)
     except executor.Error as e:
       raise TaskError(e)
 
 
-class NailgunTask(NailgunTaskBase, Task):
-  # TODO(John Sirois): This just prevents ripple - maybe inline
-  pass
+# TODO(John Sirois): This just prevents ripple - maybe inline
+class NailgunTask(NailgunTaskBase, Task): pass
 
 
 class NailgunKillall(Task):
-  """A task to manually kill nailguns."""
+  """Kill running nailgun servers."""
+
   @classmethod
   def register_options(cls, register):
     super(NailgunKillall, cls).register_options(register)
@@ -114,4 +119,4 @@ class NailgunKillall(Task):
              help='Kill all nailguns servers launched by pants for all workspaces on the system.')
 
   def execute(self):
-    NailgunTaskBase.killall(everywhere=self.get_options().everywhere)
+    NailgunProcessGroup().killall(everywhere=self.get_options().everywhere)

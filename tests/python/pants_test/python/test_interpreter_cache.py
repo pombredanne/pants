@@ -2,87 +2,106 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-import contextlib
-import shutil
-import tempfile
-import unittest2 as unittest
-
-from pants.backend.python.interpreter_cache import PythonInterpreter, PythonInterpreterCache
-from pants.util.contextutil import temporary_dir
+import os
+import unittest
 
 import mock
+from pex.package import EggPackage, Package, SourcePackage
+from pex.resolver import resolve
+
+from pants.backend.python.interpreter_cache import PythonInterpreter, PythonInterpreterCache
+from pants.backend.python.python_setup import PythonRepos, PythonSetup
+from pants.util.contextutil import temporary_dir
+from pants_test.subsystem.subsystem_util import create_subsystem
 
 
 class TestInterpreterCache(unittest.TestCase):
   def _make_bad_requirement(self, requirement):
-    """
-    Turn a requirement that passes into one we know will fail. E.g. 'CPython==2.7.5' becomes
-    'CPython==99.7.5'
+    """Turns a requirement that passes into one we know will fail.
+
+    E.g. 'CPython==2.7.5' becomes 'CPython==99.7.5'
     """
     return str(requirement).replace('==2.', '==99.')
 
-  @mock.patch('pants.backend.python.interpreter_cache.PythonSetup', return_value=mock.MagicMock())
-  def test_cache_setup_with_no_filters_uses_repo_default_excluded(self, MockSetup):
-    # This is the interpreter we'll inject into the cache
-    interpreter = PythonInterpreter.get()
+  def setUp(self):
+    self._interpreter = PythonInterpreter.get()
 
-    mock_setup = MockSetup.return_value
-    # Explicitly set a repo-wide requirement that excludes our one interpreter
+  def _do_test(self, interpreter_requirement, filters, expected):
+    mock_setup = mock.MagicMock().return_value
+
+    # Explicitly set a repo-wide requirement that excludes our one interpreter.
     type(mock_setup).interpreter_requirement = mock.PropertyMock(
-        return_value=self._make_bad_requirement(interpreter.identity.requirement))
+      return_value=interpreter_requirement)
 
     with temporary_dir() as path:
-      mock_setup.scratch_dir.return_value = path
-
-      cache = PythonInterpreterCache(mock.MagicMock())
+      mock_setup.interpreter_cache_dir = path
+      cache = PythonInterpreterCache(mock_setup, mock.MagicMock())
 
       def set_interpreters(_):
-        cache._interpreters.add(interpreter)
+        cache._interpreters.add(self._interpreter)
 
       cache._setup_cached = mock.Mock(side_effect=set_interpreters)
       cache._setup_paths = mock.Mock()
 
-      self.assertEqual(len(cache.setup()), 0)
+      self.assertEqual(cache.setup(filters=filters), expected)
 
-  @mock.patch('pants.backend.python.interpreter_cache.PythonSetup', return_value=mock.MagicMock())
-  def test_cache_setup_with_no_filters_uses_repo_default_excluded(self, MockSetup):
-    interpreter = PythonInterpreter.get()
+  def test_cache_setup_with_no_filters_uses_repo_default_excluded(self):
+    self._do_test(self._make_bad_requirement(self._interpreter.identity.requirement), [], [])
 
-    mock_setup = MockSetup.return_value
-    type(mock_setup).interpreter_requirement = mock.PropertyMock(return_value=None)
+  def test_cache_setup_with_no_filters_uses_repo_default(self):
+    self._do_test(None, [], [self._interpreter])
 
-    with temporary_dir() as path:
-      mock_setup.scratch_dir.return_value = path
+  def test_cache_setup_with_filter_overrides_repo_default(self):
+    self._do_test(self._make_bad_requirement(self._interpreter.identity.requirement),
+                  (str(self._interpreter.identity.requirement), ),
+                  [self._interpreter])
 
-      cache = PythonInterpreterCache(mock.MagicMock())
+  def test_setup_using_eggs(self):
+    def link_egg(repo_root, requirement):
+      existing_dist_location = self._interpreter.get_location(requirement)
+      if existing_dist_location is not None:
+        existing_dist = Package.from_href(existing_dist_location)
+        requirement = '{}=={}'.format(existing_dist.name, existing_dist.raw_version)
 
-      def set_interpreters(_):
-        cache._interpreters.add(interpreter)
+      distributions = resolve([requirement],
+                              interpreter=self._interpreter,
+                              precedence=(EggPackage, SourcePackage))
+      self.assertEqual(1, len(distributions))
+      dist_location = distributions[0].location
 
-      cache._setup_cached = mock.Mock(side_effect=set_interpreters)
+      self.assertRegexpMatches(dist_location, r'\.egg$')
+      os.symlink(dist_location, os.path.join(repo_root, os.path.basename(dist_location)))
 
-      self.assertEqual(cache.setup(), [interpreter])
+      return Package.from_href(dist_location).raw_version
 
-  @mock.patch('pants.backend.python.interpreter_cache.PythonSetup', return_value=mock.MagicMock())
-  def test_cache_setup_with_filter_overrides_repo_default(self, MockSetup):
-    interpreter = PythonInterpreter.get()
+    with temporary_dir() as root:
+      egg_dir = os.path.join(root, 'eggs')
+      os.makedirs(egg_dir)
+      setuptools_version = link_egg(egg_dir, 'setuptools')
+      wheel_version = link_egg(egg_dir, 'wheel')
 
-    mock_setup = MockSetup.return_value
-    # Explicitly set a repo-wide requirement that excludes our one interpreter
-    type(mock_setup).interpreter_requirement = mock.PropertyMock(
-        return_value=self._make_bad_requirement(interpreter.identity.requirement))
+      interpreter_requirement = self._interpreter.identity.requirement
+      python_setup = create_subsystem(PythonSetup,
+                                      interpreter_cache_dir=None,
+                                      pants_workdir=os.path.join(root, 'workdir'),
+                                      interpreter_requirement=interpreter_requirement,
+                                      setuptools_version=setuptools_version,
+                                      wheel_version=wheel_version)
+      python_repos = create_subsystem(PythonRepos, indexes=[], repos=[egg_dir])
+      cache = PythonInterpreterCache(python_setup, python_repos)
 
-    with temporary_dir() as path:
-      mock_setup.scratch_dir.return_value = path
+      interpereters = cache.setup(paths=[os.path.dirname(self._interpreter.binary)],
+                                  filters=[str(interpreter_requirement)])
+      self.assertGreater(len(interpereters), 0)
 
-      cache = PythonInterpreterCache(mock.MagicMock())
+      def assert_egg_extra(interpreter, name, version):
+        location = interpreter.get_location('{}=={}'.format(name, version))
+        self.assertIsNotNone(location)
+        self.assertIsInstance(Package.from_href(location), EggPackage)
 
-      def set_interpreters(_):
-        cache._interpreters.add(interpreter)
-
-      cache._setup_cached = mock.Mock(side_effect=set_interpreters)
-
-      self.assertEqual(cache.setup(filters=(str(interpreter.identity.requirement),)), [interpreter])
+      for interpreter in interpereters:
+        assert_egg_extra(interpreter, 'setuptools', setuptools_version)
+        assert_egg_extra(interpreter, 'wheel', wheel_version)

@@ -2,47 +2,52 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import os
 from textwrap import dedent
 
-from pants.backend.core.targets.dependencies import Dependencies
 from pants.backend.core.tasks.listtargets import ListTargets
 from pants.backend.jvm.artifact import Artifact
 from pants.backend.jvm.repository import Repository
+from pants.backend.jvm.scala_artifact import ScalaArtifact
 from pants.backend.jvm.targets.java_library import JavaLibrary
-from pants.base.build_file_aliases import BuildFileAliases
-from pants_test.tasks.test_base import ConsoleTaskTest
+from pants.build_graph.build_file_aliases import BuildFileAliases
+from pants.build_graph.target import Target
+from pants_test.tasks.task_test_base import ConsoleTaskTestBase
 
 
-class BaseListTargetsTest(ConsoleTaskTest):
+class BaseListTargetsTest(ConsoleTaskTestBase):
+
   @classmethod
   def task_type(cls):
     return ListTargets
 
 
 class ListTargetsTestEmpty(BaseListTargetsTest):
+
   def test_list_all_empty(self):
     self.assertEqual('', self.execute_task())
-    self.assertEqual('', self.execute_task(args=['--test-sep=###']))
+    self.assertEqual('', self.execute_task(options={'sep': '###'}))
     self.assertEqual([], self.execute_console_task())
 
 
 class ListTargetsTest(BaseListTargetsTest):
+
   @property
   def alias_groups(self):
-    return BuildFileAliases.create(
+    return BuildFileAliases(
       targets={
-        'target': Dependencies,
+        'target': Target,
         'java_library': JavaLibrary,
       },
       objects={
         'pants': lambda x: x,
         'artifact': Artifact,
+        'scala_artifact': ScalaArtifact,
         'public': Repository(name='public',
-                             url='http://maven.twttr.com',
+                             url='http://maven.example.com',
                              push_db_basedir='/tmp'),
       }
     )
@@ -52,20 +57,22 @@ class ListTargetsTest(BaseListTargetsTest):
 
     # Setup a BUILD tree for various list tests
     class Lib(object):
+
       def __init__(self, name, provides=False):
         self.name = name
-        self.provides = dedent('''
+        self.provides = dedent("""
             artifact(
-              org='com.twitter',
-              name='%s',
+              org='com.example',
+              name='{0}',
               repo=public
             )
-            ''' % name).strip() if provides else 'None'
+            """.format(name)).strip() if provides else 'None'
 
     def create_library(path, *libs):
       libs = libs or [Lib(os.path.basename(os.path.dirname(self.build_path(path))))]
       for lib in libs:
-        target = "java_library(name='%s', provides=%s, sources=[])\n" % (lib.name, lib.provides)
+        target = "java_library(name='{name}', provides={provides}, sources=[])\n".format(
+          name=lib.name, provides=lib.provides)
         self.add_to_build_file(path, target)
 
     create_library('a')
@@ -79,11 +86,12 @@ class ListTargetsTest(BaseListTargetsTest):
           dependencies=[
             'a/b/c:c3',
             'a/b/d:d',
-          ]
-        ).with_description("""
+          ],
+          description = """
         Exercises alias resolution.
         Further description.
-        """)
+          """,
+        )
         '''))
 
   def test_list_path(self):
@@ -127,7 +135,7 @@ class ListTargetsTest(BaseListTargetsTest):
         'a/b/d:d',
         'a/b/e:e1',
         'f:alias',
-        args=['--test-sep=, '])
+        options={'sep': ', '})
 
     self.assert_console_output(
         'a:a',
@@ -141,18 +149,17 @@ class ListTargetsTest(BaseListTargetsTest):
 
   def test_list_provides(self):
     self.assert_console_output(
-        'a/b:b com.twitter#b',
-        'a/b/c:c2 com.twitter#c2',
-        args=['--test-provides'])
+        'a/b:b com.example#b',
+        'a/b/c:c2 com.example#c2',
+        options={'provides': True})
 
   def test_list_provides_customcols(self):
     self.assert_console_output(
-        '/tmp a/b:b http://maven.twttr.com public com.twitter#b',
-        '/tmp a/b/c:c2 http://maven.twttr.com public com.twitter#c2',
-        args=[
-            '--test-provides',
-            '--test-provides-columns=push_db_basedir,address,repo_url,repo_name,artifact_id'
-        ])
+        '/tmp a/b:b http://maven.example.com public com.example#b',
+        '/tmp a/b/c:c2 http://maven.example.com public com.example#c2',
+        options={'provides': True,
+                 'provides_columns': 'push_db_basedir,address,repo_url,repo_name,artifact_id'}
+    )
 
   def test_list_dedups(self):
     targets = []
@@ -168,15 +175,15 @@ class ListTargetsTest(BaseListTargetsTest):
   def test_list_documented(self):
     self.assert_console_output(
       # Confirm empty listing
-      args=['--test-documented'],
-      targets=[self.target('a/b')]
+      targets=[self.target('a/b')],
+      options={'documented': True},
     )
 
     self.assert_console_output(
-      dedent('''
+      dedent("""
       f:alias
         Exercises alias resolution.
         Further description.
-      ''').strip(),
-      args=['--test-documented']
+      """).strip(),
+      options={'documented': True}
     )

@@ -2,12 +2,14 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import BaseHTTPServer
 import itertools
 import json
+import logging
+import mimetypes
 import os
 import pkgutil
 import re
@@ -15,19 +17,22 @@ import urllib
 import urlparse
 from collections import namedtuple
 from datetime import date, datetime
+from textwrap import dedent
 
-import mimetypes
 import pystache
-
+from six.moves import range
 
 from pants.base.build_environment import get_buildroot
 from pants.base.mustache import MustacheRenderer
 from pants.base.run_info import RunInfo
-from pants.util.dirutil import safe_mkdir
+from pants.pantsd.process_manager import ProcessManager
+from pants.stats.statsdb import StatsDBFactory
 
+
+logger = logging.getLogger(__name__)
 
 # Google Prettyprint plugin files.
-PPP_RE=re.compile("""^lang-.*\.js$""")
+PPP_RE = re.compile("""^lang-.*\.js$""")
 
 
 class PantsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
@@ -42,12 +47,18 @@ class PantsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     self._GET_handlers = [
       ('/runs/', self._handle_runs),  # Show list of known pants runs.
       ('/run/', self._handle_run),  # Show a report for a single pants run.
+      ('/stats/', self._handle_stats),  # Show a stats analytics page.
+      ('/statsdata/', self._handle_statsdata),  # Get JSON stats data.
       ('/browse/', self._handle_browse),  # Browse filesystem under build root.
       ('/content/', self._handle_content),  # Show content of file.
       ('/assets/', self._handle_assets),  # Statically serve assets (css, js etc.)
       ('/poll', self._handle_poll),  # Handle poll requests for raw file content.
-      ('/latestrunid', self._handle_latest_runid)  # Return id of latest pants run.
+      ('/latestrunid', self._handle_latest_runid),  # Return id of latest pants run.
+      ('/favicon.ico', self._handle_favicon)  # Return favicon.
     ]
+    # Note: BaseHTTPServer.BaseHTTPRequestHandler is an old-style class, so we must
+    # invoke its __init__ like this.
+    # TODO: Replace this entirely with a proper server as part of the pants daemon.
     BaseHTTPServer.BaseHTTPRequestHandler.__init__(self, request, client_address, server)
 
   def do_GET(self):
@@ -67,10 +78,10 @@ class PantsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
         self._handle_runs('', {})
         return
 
-      self._send_content('Invalid GET request %s' % self.path, 'text/html')
+      self._send_content('Invalid GET request {}'.format(self.path), 'text/html', code=400)
     except (IOError, ValueError):
       pass  # Printing these errors gets annoying, and there's nothing to do about them anyway.
-      #sys.stderr.write('Invalid GET request %s' % self.path)
+      #sys.stderr.write('Invalid GET request {}'.format(self.path))
 
   def _handle_runs(self, relpath, params):
     """Show a listing of all pants runs since the last clean-all."""
@@ -78,6 +89,20 @@ class PantsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     args = self._default_template_args('run_list')
     args['runs_by_day'] = runs_by_day
     self._send_content(self._renderer.render_name('base', args), 'text/html')
+
+  _collapsible_fmt_string = dedent("""
+    <div class="{class_prefix}" id="{id}">
+      <div class="{class_prefix}-header toggle-header" id="{id}-header">
+        <div class="{class_prefix}-header-icon toggle-header-icon" onclick="pants.collapsible.toggle('{id}')">
+          <i id="{id}-icon" class="visibility-icon icon-large icon-caret-right hidden"></i>
+        </div>
+        <div class="{class_prefix}-header-text toggle-header-text">
+          [<span id="{id}-header-text">{title}</span>]
+        </div>
+      </div>
+      <div class="{class_prefix}-content toggle-content nodisplay" id="{id}-content"></div>
+    </div>
+  """)
 
   def _handle_run(self, relpath, params):
     """Show the report for a single pants run."""
@@ -97,17 +122,37 @@ class PantsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       artifact_cache_stats_path = os.path.join(report_dir, 'artifact_cache_stats')
       run_info['timestamp_text'] = \
         datetime.fromtimestamp(float(run_info['timestamp'])).strftime('%H:%M:%S on %A, %B %d %Y')
+
+      timings_and_stats = '\n'.join([
+        self._collapsible_fmt_string.format(id='cumulative-timings-collapsible',
+                                            title='Cumulative timings', class_prefix='aggregated-timings'),
+        self._collapsible_fmt_string.format(id='self-timings-collapsible',
+                                            title='Self timings', class_prefix='aggregated-timings'),
+        self._collapsible_fmt_string.format(id='artifact-cache-stats-collapsible',
+                                            title='Artifact cache stats', class_prefix='artifact-cache-stats')
+      ])
+
       args.update({'run_info': run_info,
                    'report_path': report_relpath,
                    'self_timings_path': self_timings_path,
                    'cumulative_timings_path': cumulative_timings_path,
-                   'artifact_cache_stats_path': artifact_cache_stats_path})
+                   'artifact_cache_stats_path': artifact_cache_stats_path,
+                   'timings_and_stats': timings_and_stats})
       if run_id == 'latest':
         args['is_latest'] = run_info['id']
-      args.update({
-        'collapsible': lambda x: self._renderer.render_callable('collapsible', x, args)
-      })
+
     self._send_content(self._renderer.render_name('base', args), 'text/html')
+
+  def _handle_stats(self, relpath, params):
+    """Show stats for pants runs in the statsdb."""
+    args = self._default_template_args('stats')
+    self._send_content(self._renderer.render_name('base', args), 'text/html')
+
+  def _handle_statsdata(self, relpath, params):
+    """Show stats for pants runs in the statsdb."""
+    statsdb = StatsDBFactory.global_instance().get_db()
+    statsdata = list(statsdb.get_aggregated_stats_for_cmd_line('cumulative_timings', '%'))
+    self._send_content(json.dumps(statsdata), 'application/json')
 
   def _handle_browse(self, relpath, params):
     """Handle requests to browse the filesystem under the build root."""
@@ -126,26 +171,26 @@ class PantsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       with open(abspath, 'r') as infile:
         content = infile.read()
     else:
-      content = 'No file found at %s' % abspath
+      content = 'No file found at {}'.format(abspath)
     content_type = mimetypes.guess_type(abspath)[0] or 'text/plain'
     if not content_type.startswith('text/') and not content_type == 'application/xml':
       # Binary file. Display it as hex, split into lines.
       n = 120  # Display lines of this max size.
       content = repr(content)[1:-1]  # Will escape non-printables etc, dropping surrounding quotes.
-      content = '\n'.join([content[i:i+n] for i in xrange(0, len(content), n)])
+      content = '\n'.join([content[i:i + n] for i in range(0, len(content), n)])
       prettify = False
       prettify_extra_langs = []
     else:
       prettify = True
       if self._settings.assets_dir:
         prettify_extra_dir = os.path.join(self._settings.assets_dir, 'js', 'prettify_extra_langs')
-        prettify_extra_langs = [ {'name': x} for x in os.listdir(prettify_extra_dir) ]
+        prettify_extra_langs = [{'name': x} for x in os.listdir(prettify_extra_dir)]
       else:
         # TODO: Find these from our package, somehow.
         prettify_extra_langs = []
     linenums = True
-    args = { 'prettify_extra_langs': prettify_extra_langs, 'content': content,
-             'prettify': prettify, 'linenums': linenums }
+    args = {'prettify_extra_langs': prettify_extra_langs, 'content': content,
+            'prettify': prettify, 'linenums': linenums}
     self._send_content(self._renderer.render_name('file_content', args), 'text/html')
 
   def _handle_assets(self, relpath, params):
@@ -192,6 +237,10 @@ class PantsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     else:
       self._send_content(latest_runinfo['id'], 'text/plain')
 
+  def _handle_favicon(self, relpath, params):
+    """Statically serve the favicon out of the assets dir."""
+    self._handle_assets('favicon.ico', params)
+
   def _partition_runs_by_day(self):
     """Split the runs by day, so we can display them grouped that way."""
     run_infos = self._get_all_run_infos()
@@ -214,8 +263,8 @@ class PantsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
 
     keyfunc = lambda x: datetime.fromtimestamp(float(x['timestamp']))
     sorted_run_infos = sorted(run_infos, key=keyfunc, reverse=True)
-    return [ { 'date_text': date_text(dt), 'run_infos': [x for x in infos] }
-             for dt, infos in itertools.groupby(sorted_run_infos, lambda x: keyfunc(x).date()) ]
+    return [{'date_text': date_text(dt), 'run_infos': [x for x in infos]}
+            for dt, infos in itertools.groupby(sorted_run_infos, lambda x: keyfunc(x).date())]
 
   def _get_run_info_dict(self, run_id):
     """Get the RunInfo for a run, as a dict."""
@@ -243,25 +292,26 @@ class PantsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     """Show a directory listing."""
     relpath = os.path.relpath(abspath, self._root)
     breadcrumbs = self._create_breadcrumbs(relpath)
-    entries = [ {'link_path': os.path.join(relpath, e), 'name': e} for e in os.listdir(abspath)]
+    entries = [{'link_path': os.path.join(relpath, e), 'name': e} for e in os.listdir(abspath)]
     args = self._default_template_args('dir')
-    args.update({ 'root_parent': os.path.dirname(self._root),
-                  'breadcrumbs': breadcrumbs,
-                  'entries': entries,
-                  'params': params })
+    args.update({'root_parent': os.path.dirname(self._root),
+                 'breadcrumbs': breadcrumbs,
+                 'entries': entries,
+                 'params': params})
     self._send_content(self._renderer.render_name('base', args), 'text/html')
 
   def _serve_file(self, abspath, params):
     """Show a file.
 
-    The actual content of the file is rendered by _handle_content."""
+    The actual content of the file is rendered by _handle_content.
+    """
     relpath = os.path.relpath(abspath, self._root)
     breadcrumbs = self._create_breadcrumbs(relpath)
     link_path = urlparse.urlunparse([None, None, relpath, None, urllib.urlencode(params), None])
     args = self._default_template_args('file')
-    args.update({ 'root_parent': os.path.dirname(self._root),
-                  'breadcrumbs': breadcrumbs,
-                  'link_path': link_path })
+    args.update({'root_parent': os.path.dirname(self._root),
+                 'breadcrumbs': breadcrumbs,
+                 'link_path': link_path})
     self._send_content(self._renderer.render_name('base', args), 'text/html')
 
   def _send_content(self, content, content_type, code=200):
@@ -277,7 +327,7 @@ class PantsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
     client_ip = self._client_address[0]
     if not client_ip in self._settings.allowed_clients and \
        not 'ALL' in self._settings.allowed_clients:
-      self._send_content('Access from host %s forbidden.' % client_ip, 'text/html')
+      self._send_content('Access from host {} forbidden.'.format(client_ip), 'text/html')
       return False
     return True
 
@@ -302,8 +352,8 @@ class PantsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       breadcrumbs = []
     else:
       path_parts = [os.path.basename(self._root)] + relpath.split(os.path.sep)
-      path_links = ['/'.join(path_parts[1:i+1]) for i, name in enumerate(path_parts)]
-      breadcrumbs = [{'link_path': link_path, 'name': name }
+      path_links = ['/'.join(path_parts[1:i + 1]) for i, name in enumerate(path_parts)]
+      breadcrumbs = [{'link_path': link_path, 'name': name}
                      for link_path, name in zip(path_links, path_parts)]
     return breadcrumbs
 
@@ -313,31 +363,35 @@ class PantsHandler(BaseHTTPServer.BaseHTTPRequestHandler):
       template_name = pystache.render(text, args)
       return self._renderer.render_name(template_name, args)
     # Our base template calls include on the content_template.
-    ret = { 'content_template': content_template }
+    ret = {'content_template': content_template}
     ret['include'] = lambda text: include(text, ret)
     return ret
 
   def log_message(self, fmt, *args):
     """Silence BaseHTTPRequestHandler's logging."""
-    pass
 
 
 class ReportingServer(object):
-  # Reporting server settings.
-  #   info_dir: path to dir containing RunInfo files.
-  #   template_dir: location of mustache template files. If None, the templates
-  #                 embedded in our package are used.
-  #   assets_dir: location of assets (js, css etc.) If None, the assets
-  #               embedded in our package are used.
-  #   root: build root.
-  #   allowed_clients: list of ips or ['ALL'].
-  Settings = namedtuple('Settings',
-    ['info_dir', 'template_dir', 'assets_dir', 'root', 'allowed_clients'])
+  """Reporting Server HTTP server."""
+
+  class Settings(namedtuple('Settings', ['info_dir', 'template_dir', 'assets_dir', 'root',
+                                         'allowed_clients'])):
+    """Reporting server settings.
+
+       info_dir: path to dir containing RunInfo files.
+       template_dir: location of mustache template files. If None, the templates
+                     embedded in our package are used.
+       assets_dir: location of assets (js, css etc.) If None, the assets
+                   embedded in our package are used.
+       root: build root.
+       allowed_clients: list of ips or ['ALL'].
+    """
 
   def __init__(self, port, settings):
     renderer = MustacheRenderer(settings.template_dir, __name__)
 
     class MyHandler(PantsHandler):
+
       def __init__(self, request, client_address, server):
         PantsHandler.__init__(self, settings, renderer, request, client_address, server)
 
@@ -351,42 +405,28 @@ class ReportingServer(object):
     self._httpd.serve_forever()
 
 
-class ReportingServerManager(object):
-  @staticmethod
-  def _get_pidfile_dir():
-    return os.path.join(get_buildroot(), '.pids', 'daemon')
+class ReportingServerManager(ProcessManager):
 
-  @staticmethod
-  def save_current_server_port(port):
-    """Save the port of the currently-running server, so we can find it across pants runs."""
-    # We don't put the pidfile in .pants.d, because we want to find it even after a clean.
-    # NOTE: If changing this dir/file name, also change get_current_server_pidfiles_and_ports
-    # appropriately.
-    # TODO: Generalize the pidfile idiom into some central library.
-    pidfile_dir = ReportingServerManager._get_pidfile_dir()
-    safe_mkdir(pidfile_dir)
-    pidfile = os.path.join(pidfile_dir, 'port_%d.pid' % port)
-    with open(pidfile, 'w') as outfile:
-      outfile.write(str(os.getpid()))
+  def __init__(self, context=None, options=None):
+    ProcessManager.__init__(self, name='reporting_server')
+    self.context = context
+    self.options = options
 
-  @staticmethod
-  def get_current_server_port():
-    """Returns the port of the currently-running server, or None if no server is detected."""
-    pidfiles_and_ports = ReportingServerManager.get_current_server_pidfiles_and_ports()
-    # There should only be one pidfile, but in case there are many due to error,
-    # pick the first one.
-    return pidfiles_and_ports[0][1] if pidfiles_and_ports else None
+  def post_fork_child(self):
+    """Post-fork() child callback for ProcessManager.daemonize()."""
+    # The server finds run-specific info dirs by looking at the subdirectories of info_dir,
+    # which is conveniently and obviously the parent dir of the current run's info dir.
+    info_dir = os.path.dirname(self.context.run_tracker.run_info_dir)
 
-  @staticmethod
-  def get_current_server_pidfiles_and_ports():
-    """Returns a list of pairs (pidfile, port) of all found pidfiles."""
-    pidfile_dir = ReportingServerManager._get_pidfile_dir()
-    # There should only be one pidfile, but there may be errors/race conditions where
-    # there are multiple of them.
-    pidfile_names = os.listdir(pidfile_dir) if os.path.exists(pidfile_dir) else []
-    ret = []
-    for pidfile_name in pidfile_names:
-      m = re.match(r'port_(\d+)\.pid', pidfile_name)
-      if m is not None:
-        ret.append((os.path.join(pidfile_dir, pidfile_name), int(m.group(1))))
-    return ret
+    settings = ReportingServer.Settings(info_dir=info_dir,
+                                        root=get_buildroot(),
+                                        template_dir=self.options.template_dir,
+                                        assets_dir=self.options.assets_dir,
+                                        allowed_clients=self.options.allowed_clients)
+
+    server = ReportingServer(self.options.port, settings)
+
+    self.write_socket(server.server_port())
+
+    # Block forever.
+    server.start()

@@ -2,10 +2,11 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 from hashlib import sha1
+
 
 class PayloadFieldAlreadyDefinedError(Exception): pass
 
@@ -19,10 +20,15 @@ class Payload(object):
   A Target will add PayloadFields to its Payload until instantiation is finished, at which point
   freeze() will be called and make the Payload immutable.
   """
+
   def __init__(self):
     self._fields = {}
     self._frozen = False
     self._fingerprint_memo_map = {}
+
+  @property
+  def fields(self):
+    return self._fields.items()
 
   def freeze(self):
     """Permanently make this Payload instance immutable.
@@ -80,7 +86,7 @@ class Payload(object):
     `fingerprint()` also returns `None`.
 
     :param iterable<string> field_keys: A subset of fields to use for the fingerprint.  Defaults
-      to all fields.
+                                        to all fields.
     """
     field_keys = frozenset(field_keys or self._fields.keys())
     if field_keys not in self._fingerprint_memo_map:
@@ -103,9 +109,21 @@ class Payload(object):
     else:
       return hasher.hexdigest()
 
+  def mark_dirty(self):
+    """Invalidates memoized fingerprints for this payload.
+
+    Exposed for testing.
+    """
+    self._fingerprint_memo_map = {}
+    for field in self._fields.values():
+      field.mark_dirty()
+
   def __getattr__(self, attr):
     field = self._fields[attr]
     if field is not None:
       return field.value
     else:
       return None
+
+  def __hasattr__(self, attr):
+    return attr in self._fields

@@ -11,19 +11,24 @@ python_library(
 python_library(
   name = 'common',
   sources = [
-    'dependencies.py',
-    'doc.py',
     'prep_command.py',
     'resources.py',
   ],
   dependencies = [
-    '3rdparty/python/twitter/commons:twitter.common.collections',
-    '3rdparty/python/twitter/commons:twitter.common.lang',
-    '3rdparty/python/twitter/commons:twitter.common.log',
-    'src/python/pants/base:address',
-    'src/python/pants/base:build_environment',
+    ':doc',
+    'src/python/pants/base:deprecated',
+    'src/python/pants/build_graph',
+  ],
+)
+
+python_library(
+  name = 'doc',
+  sources = [
+    'doc.py',
+  ],
+  dependencies = [
     'src/python/pants/base:payload',
     'src/python/pants/base:payload_field',
-    'src/python/pants/base:target',
+    'src/python/pants/build_graph',
   ],
 )

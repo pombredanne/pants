@@ -2,308 +2,140 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from collections import defaultdict, namedtuple
-import errno
 import os
 import re
+import shutil
 import subprocess
 
-from twitter.common import log
 from twitter.common.collections import OrderedSet
 
+from pants.backend.codegen.subsystems.thrift_defaults import ThriftDefaults
 from pants.backend.codegen.targets.java_thrift_library import JavaThriftLibrary
-from pants.backend.codegen.targets.python_thrift_library import PythonThriftLibrary
-from pants.backend.codegen.tasks.code_gen import CodeGen
+from pants.backend.codegen.tasks.simple_codegen_task import SimpleCodegenTask
 from pants.backend.jvm.targets.java_library import JavaLibrary
-from pants.backend.python.targets.python_library import PythonLibrary
-from pants.base.address import SyntheticAddress
-from pants.base.address_lookup_error import AddressLookupError
 from pants.base.build_environment import get_buildroot
 from pants.base.exceptions import TaskError
-from pants.base.target import Target
-from pants.thrift_util import calculate_compile_roots, select_thrift_binary
-from pants.util.dirutil import safe_mkdir, safe_walk
+from pants.base.workunit import WorkUnitLabel
+from pants.binaries.thrift_binary import ThriftBinary
+from pants.option.custom_types import list_option
+from pants.util.memo import memoized_property
 
 
-def _copytree(from_base, to_base):
-  def abort(error):
-    raise TaskError('Failed to copy from %s to %s: %s' % (from_base, to_base, error))
-
-  # TODO(John Sirois): Consider adding a unit test and lifting this to common/dirutils or similar
-  def safe_link(src, dst):
-    try:
-      os.link(src, dst)
-    except OSError as e:
-      if e.errno != errno.EEXIST:
-        raise e
-
-  for dirpath, dirnames, filenames in safe_walk(from_base, topdown=True, onerror=abort):
-    to_path = os.path.join(to_base, os.path.relpath(dirpath, from_base))
-    for dirname in dirnames:
-      safe_mkdir(os.path.join(to_path, dirname))
-    for filename in filenames:
-      safe_link(os.path.join(dirpath, filename), os.path.join(to_path, filename))
-
-
-class ApacheThriftGen(CodeGen):
-
-  GenInfo = namedtuple('GenInfo', ['gen', 'deps'])
-  ThriftSession = namedtuple('ThriftSession', ['outdir', 'cmd', 'process'])
+class ApacheThriftGen(SimpleCodegenTask):
 
   @classmethod
   def register_options(cls, register):
     super(ApacheThriftGen, cls).register_options(register)
-    register('--version', help='Thrift compiler version.')
-    register('--lang', action='append', choices=['python', 'java'],
-             help='Force generation of thrift code for these languages.')
+
+    # NB: As of thrift 0.9.2 there is 1 warning that -strict promotes to an error - missing a
+    # struct field id.  If an artifact was cached with strict off, we must re-gen with strict on
+    # since this case may be present and need to generate a thrift compile error.
+    register('--strict', default=True, fingerprint=True, action='store_true',
+             help='Run thrift compiler with strict warnings.')
+
+    register('--gen-options', advanced=True, fingerprint=True,
+             help='Use these apache thrift java gen options.')
+    register('--deps', advanced=True, type=list_option,
+             help='A list of specs pointing to dependencies of thrift generated java code.')
+    register('--service-deps', advanced=True, type=list_option,
+             help='A list of specs pointing to dependencies of thrift generated java service '
+                  'code.  If not supplied, then --deps will be used for service deps.')
+
+  @classmethod
+  def global_subsystems(cls):
+    return super(ApacheThriftGen, cls).global_subsystems() + (ThriftDefaults,)
+
+  @classmethod
+  def task_subsystems(cls):
+    return super(ApacheThriftGen, cls).task_subsystems() + (ThriftBinary.Factory,)
+
+  @classmethod
+  def subsystem_dependencies(cls):
+    return (super(ApacheThriftGen, cls).subsystem_dependencies() +
+            (ThriftDefaults, ThriftBinary.Factory.scoped(cls)))
 
   def __init__(self, *args, **kwargs):
     super(ApacheThriftGen, self).__init__(*args, **kwargs)
-    self.combined_dir = os.path.join(self.workdir, 'combined')
-    self.combined_relpath = os.path.relpath(self.combined_dir, get_buildroot())
-    self.session_dir = os.path.join(self.workdir, 'sessions')
+    self._thrift_defaults = ThriftDefaults.global_instance()
 
-    self.strict = self.context.config.getbool('thrift-gen', 'strict')
-    self.verbose = self.context.config.getbool('thrift-gen', 'verbose')
+  @memoized_property
+  def _thrift_binary(self):
+    thrift_binary = ThriftBinary.Factory.scoped_instance(self).create()
+    return thrift_binary.path
 
-    self.gen_langs = set(self.get_options().lang)
-    for lang in ('java', 'python'):
-      if self.context.products.isrequired(lang):
-        self.gen_langs.add(lang)
+  @memoized_property
+  def _deps(self):
+    deps = self.get_options().deps
+    return list(self.resolve_deps(deps)) if deps else []
 
-    # TODO(pl): This is broken because of how __init__.py files are generated/cached
-    # for combined python thrift packages.
-    # self.setup_artifact_cache_from_config(config_section='thrift-gen')
+  @memoized_property
+  def _service_deps(self):
+    service_deps = self.get_options().service_deps
+    return list(self.resolve_deps(service_deps)) if service_deps else self._deps
 
-  _thrift_binary = None
-  @property
-  def thrift_binary(self):
-    if self._thrift_binary is None:
-      self._thrift_binary = select_thrift_binary(
-        self.context.config,
-        version=self.get_options().version
-      )
-    return self._thrift_binary
+  SERVICE_PARSER = re.compile(r'^\s*service\s+(?:[^\s{]+)')
 
-  _defaults = None
-  @property
-  def defaults(self):
-    if self._defaults is None:
-      self._defaults = JavaThriftLibrary.Defaults(self.context.config)
-    return self._defaults
+  def _declares_service(self, source):
+    with open(source) as thrift:
+      return any(line for line in thrift if self.SERVICE_PARSER.search(line))
 
-  def create_geninfo(self, key):
-    gen_info = self.context.config.getdict('thrift-gen', key)
-    gen = gen_info['gen']
-    deps = {}
-    for category, depspecs in gen_info['deps'].items():
-      dependencies = OrderedSet()
-      deps[category] = dependencies
-      for depspec in depspecs:
-        try:
-          dependencies.update(self.context.resolve(depspec))
-        except AddressLookupError as e:
-          raise self.DepLookupError("{message}\n  referenced from [{section}] key: {key}"
-                                    "in pants.ini" .format(message=e, section='thrift-gen',
-                                                           key="gen->deps->{category}"
-                                                           .format(category=category)))
-    return self.GenInfo(gen, deps)
+  def synthetic_target_extra_dependencies(self, target, target_workdir):
+    for source in target.sources_relative_to_buildroot():
+      if self._declares_service(os.path.join(get_buildroot(), source)):
+        return self._service_deps
+    return self._deps
 
-  _gen_java = None
-  @property
-  def gen_java(self):
-    if self._gen_java is None:
-      self._gen_java = self.create_geninfo('java')
-    return self._gen_java
-
-  _gen_python = None
-  @property
-  def gen_python(self):
-    if self._gen_python is None:
-      self._gen_python = self.create_geninfo('python')
-    return self._gen_python
-
-  def invalidate_for_files(self):
-    # TODO: This will prevent artifact caching across platforms.
-    # Find some cross-platform way to assert the thrift binary version.
-    return [self.thrift_binary]
+  def synthetic_target_type(self, target):
+    return JavaLibrary
 
   def is_gentarget(self, target):
-    return ((isinstance(target, JavaThriftLibrary)
-             and self.defaults.get_compiler(target) == 'thrift')
-            or isinstance(target, PythonThriftLibrary))
+    return (isinstance(target, JavaThriftLibrary) and
+            'thrift' == self._thrift_defaults.compiler(target))
 
-  def is_forced(self, lang):
-    return lang in self.gen_langs
+  @memoized_property
+  def _thrift_cmd(self):
+    cmd = [self._thrift_binary]
 
-  def genlangs(self):
-    return Target.LANG_DISCRIMINATORS
+    gen_options = self.get_options().gen_options
+    cmd.extend(('--gen', 'java:{}'.format(gen_options) if gen_options else 'java'))
 
-  def genlang(self, lang, targets):
-    bases, sources = calculate_compile_roots(targets, self.is_gentarget)
+    if self.get_options().strict:
+      cmd.append('-strict')
+    if self.get_options().level == 'debug':
+      cmd.append('-verbose')
+    return cmd
 
-    if lang == 'java':
-      gen = self.gen_java.gen
-    elif lang == 'python':
-      gen = self.gen_python.gen
-    else:
-      raise TaskError('Unrecognized thrift gen lang: %s' % lang)
+  def _generate_thrift(self, target, target_workdir):
+    target_cmd = self._thrift_cmd[:]
 
-    args = [
-      self.thrift_binary,
-      '--gen', gen,
-      '-recurse',
-    ]
-
-    if self.strict:
-      args.append('-strict')
-    if self.verbose:
-      args.append('-verbose')
+    bases = OrderedSet(tgt.target_base for tgt in target.closure() if self.is_gentarget(tgt))
     for base in bases:
-      args.extend(('-I', base))
+      target_cmd.extend(('-I', base))
 
-    sessions = []
-    for source in sources:
-      self.context.log.info('Generating thrift for %s\n' % source)
-      # Create a unique session dir for this thrift root.  Sources may be full paths but we only
-      # need the path relative to the build root to ensure uniqueness.
-      # TODO(John Sirois): file paths should be normalized early on and uniformly, fix the need to
-      # relpath here at all.
-      relsource = os.path.relpath(source, get_buildroot())
-      outdir = os.path.join(self.session_dir, '.'.join(relsource.split(os.path.sep)))
-      safe_mkdir(outdir)
+    target_cmd.extend(('-o', target_workdir))
 
-      cmd = args[:]
-      cmd.extend(('-o', outdir))
-      cmd.append(source)
-      log.debug('Executing: %s' % ' '.join(cmd))
-      sessions.append(self.ThriftSession(outdir, cmd, subprocess.Popen(cmd)))
-
-    result = 0
-    for session in sessions:
-      if result != 0:
-        session.process.kill()
-      else:
-        result = session.process.wait()
+    for source in target.sources_relative_to_buildroot():
+      cmd = target_cmd[:]
+      cmd.append(os.path.join(get_buildroot(), source))
+      with self.context.new_workunit(name=source,
+                                     labels=[WorkUnitLabel.TOOL],
+                                     cmd=' '.join(cmd)) as workunit:
+        result = subprocess.call(cmd,
+                                 stdout=workunit.output('stdout'),
+                                 stderr=workunit.output('stderr'))
         if result != 0:
-          self.context.log.error('Failed: %s' % ' '.join(session.cmd))
-        else:
-          _copytree(session.outdir, self.combined_dir)
-    if result != 0:
-      raise TaskError('%s ... exited non-zero (%i)' % (self.thrift_binary, result))
+          raise TaskError('{} ... exited non-zero ({})'.format(self._thrift_binary, result))
 
-  def createtarget(self, lang, gentarget, dependees):
-    if lang == 'java':
-      return self._create_java_target(gentarget, dependees)
-    elif lang == 'python':
-      return self._create_python_target(gentarget, dependees)
-    else:
-      raise TaskError('Unrecognized thrift gen lang: %s' % lang)
+    # The thrift compiler generates sources to a gen-[lang] subdir of the `-o` argument.  We
+    # relocate the generated java sources to the root of the `target_workdir` so that our base class
+    # maps them properly for source jars and the like.
+    gen_dir = os.path.join(target_workdir, 'gen-java')
+    for path in os.listdir(gen_dir):
+      shutil.move(os.path.join(gen_dir, path), target_workdir)
+    os.rmdir(gen_dir)
 
-  def _create_java_target(self, target, dependees):
-    def create_target(files, deps):
-      spec_path = os.path.join(self.combined_relpath, 'gen-java')
-      spec = '{spec_path}:{name}'.format(spec_path=spec_path, name=target.id)
-      address = SyntheticAddress.parse(spec=spec)
-      return self.context.add_new_target(address,
-                                         JavaLibrary,
-                                         derived_from=target,
-                                         sources=files,
-                                         provides=target.provides,
-                                         dependencies=deps,
-                                         excludes=target.payload.get_field_value('excludes'))
-    return self._inject_target(target, dependees, self.gen_java, 'java', create_target)
-
-  def _create_python_target(self, target, dependees):
-    def create_target(files, deps):
-      spec_path = os.path.join(self.combined_relpath, 'gen-py')
-      spec = '{spec_path}:{name}'.format(spec_path=spec_path, name=target.id)
-      address = SyntheticAddress.parse(spec=spec)
-      return self.context.add_new_target(address,
-                                         PythonLibrary,
-                                         derived_from=target,
-                                         sources=files,
-                                         dependencies=deps)
-    return self._inject_target(target, dependees, self.gen_python, 'py', create_target)
-
-  def _inject_target(self, target, dependees, geninfo, namespace, create_target):
-    files = []
-    has_service = False
-    for src in target.sources_relative_to_buildroot():
-      services, genfiles = calculate_gen(src)
-      has_service = has_service or services
-      files.extend(genfiles.get(namespace, []))
-    deps = geninfo.deps['service' if has_service else 'structs']
-    tgt = create_target(files, deps)
-    for dependee in dependees:
-      dependee.inject_dependency(tgt.address)
-    return tgt
-
-
-NAMESPACE_PARSER = re.compile(r'^\s*namespace\s+([^\s]+)\s+([^\s]+)\s*$')
-TYPE_PARSER = re.compile(r'^\s*(const|enum|exception|service|struct|union)\s+([^\s{]+).*')
-
-
-# TODO(John Sirois): consolidate thrift parsing to 1 pass instead of 2
-def calculate_gen(source):
-  """Calculates the service types and files generated for the given thrift IDL source.
-
-  Returns a tuple of (service types, generated files).
-  """
-
-  with open(source, 'r') as thrift:
-    lines = thrift.readlines()
-    namespaces = {}
-    types = defaultdict(set)
-    for line in lines:
-      match = NAMESPACE_PARSER.match(line)
-      if match:
-        lang = match.group(1)
-        namespace = match.group(2)
-        namespaces[lang] = namespace
-      else:
-        match = TYPE_PARSER.match(line)
-        if match:
-          typename = match.group(1)
-          name = match.group(2)
-          types[typename].add(name)
-
-    genfiles = defaultdict(set)
-
-    namespace = namespaces.get('py')
-    if namespace:
-      genfiles['py'].update(calculate_python_genfiles(namespace, types))
-
-    namespace = namespaces.get('java')
-    if namespace:
-      genfiles['java'].update(calculate_java_genfiles(namespace, types))
-
-    return types['service'], genfiles
-
-
-def calculate_python_genfiles(namespace, types):
-  basepath = namespace.replace('.', '/')
-  def path(name):
-    return os.path.join(basepath, '%s.py' % name)
-  yield path('__init__')
-  if 'const' in types:
-    yield path('constants')
-  if set(['enum', 'exception', 'struct', 'union']) & set(types.keys()):
-    yield path('ttypes')
-  for service in types['service']:
-    yield path(service)
-    yield os.path.join(basepath, '%s-remote' % service)
-
-
-def calculate_java_genfiles(namespace, types):
-  basepath = namespace.replace('.', '/')
-  def path(name):
-    return os.path.join(basepath, '%s.java' % name)
-  if 'const' in types:
-    yield path('Constants')
-  for typename in ['enum', 'exception', 'service', 'struct', 'union']:
-    for name in types[typename]:
-      yield path(name)
+  def execute_codegen(self, target, target_workdir):
+    self._generate_thrift(target, target_workdir)

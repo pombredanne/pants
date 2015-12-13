@@ -2,21 +2,22 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-import threading
 import multiprocessing
-from multiprocessing.pool import ThreadPool
-import os
 import signal
 import sys
+import thread
+import threading
+from multiprocessing.pool import ThreadPool
 
 from pants.reporting.report import Report
 
 
 class Work(object):
   """Represents multiple concurrent calls to the same callable."""
+
   def __init__(self, func, args_tuples, workunit_name=None):
     # A callable.
     self.func = func
@@ -49,10 +50,12 @@ class WorkerPool(object):
 
     self._shutdown_hooks = []
 
+    self.num_workers = num_workers
+
   def add_shutdown_hook(self, hook):
     self._shutdown_hooks.append(hook)
 
-  def submit_async_work(self, work,  workunit_parent=None, on_success=None, on_failure=None):
+  def submit_async_work(self, work, workunit_parent=None, on_success=None, on_failure=None):
     """Submit work to be executed in the background.
 
     - work: The work to execute.
@@ -94,11 +97,12 @@ class WorkerPool(object):
 
     def error(e):
       done()
-      self._run_tracker.log(Report.ERROR, '%s' % e)
+      self._run_tracker.log(Report.ERROR, '{}'.format(e))
 
     # We filter out Nones defensively. There shouldn't be any, but if a bug causes one,
     # Pants might hang indefinitely without this filtering.
     work_iter = iter(filter(None, work_chain))
+
     def submit_next():
       try:
         self.submit_async_work(work_iter.next(), workunit_parent=workunit_parent,
@@ -112,7 +116,7 @@ class WorkerPool(object):
       submit_next()
     except Exception as e:  # Handles errors in the submission code.
       done()
-      self._run_tracker.log(Report.ERROR, '%s' % e)
+      self._run_tracker.log(Report.ERROR, '{}'.format(e))
       raise
 
   def submit_work_and_wait(self, work, workunit_parent=None):
@@ -140,6 +144,11 @@ class WorkerPool(object):
           return func(*args_tuple)
       else:
         return func(*args_tuple)
+    except KeyboardInterrupt:
+      # If a worker thread intercepts a KeyboardInterrupt, we want to propagate it to the main
+      # thread.
+      thread.interrupt_main()
+      raise
     except Exception as e:
       if on_failure:
         # Note that here the work's workunit is closed. So, e.g., it's OK to use on_failure()
@@ -159,6 +168,7 @@ class WorkerPool(object):
   def abort(self):
     self._pool.terminate()
 
+
 class SubprocPool(object):
   """Singleton for managing multiprocessing.Pool instances
 
@@ -177,17 +187,23 @@ class SubprocPool(object):
   """
   _pool = None
   _lock = threading.Lock()
+  _num_processes = multiprocessing.cpu_count()
 
   @staticmethod
   def worker_init():
     # Exit quietly on sigint, otherwise we get {num_procs} keyboardinterrupt stacktraces spewn
-    signal.signal(signal.SIGINT, lambda *args: os._exit(0))
+    signal.signal(signal.SIGINT, lambda *args: sys.exit())
+
+  @classmethod
+  def set_num_processes(cls, num_processes):
+    cls._num_processes = num_processes
 
   @classmethod
   def foreground(cls):
     with cls._lock:
       if cls._pool is None:
-        cls._pool = multiprocessing.Pool(initializer=SubprocPool.worker_init)
+        cls._pool = multiprocessing.Pool(processes=cls._num_processes,
+                                         initializer=SubprocPool.worker_init)
       return cls._pool
 
   @classmethod

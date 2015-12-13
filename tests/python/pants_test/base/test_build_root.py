@@ -2,14 +2,14 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import os
-import unittest2 as unittest
+import unittest
 
 from pants.base.build_root import BuildRoot
-from pants.util.contextutil import environment_as, pushd, temporary_dir
+from pants.util.contextutil import pushd, temporary_dir
 from pants.util.dirutil import safe_mkdir, safe_mkdtemp, safe_rmtree, touch
 
 
@@ -23,10 +23,6 @@ class BuildRootTest(unittest.TestCase):
   def tearDown(self):
     BuildRoot().reset()
     safe_rmtree(self.new_root)
-
-  def test_via_env(self):
-    with environment_as(PANTS_BUILD_ROOT=self.new_root):
-      self.assertEqual(self.new_root, BuildRoot().path)
 
   def test_via_set(self):
     BuildRoot().path = self.new_root

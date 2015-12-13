@@ -2,18 +2,18 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from contextlib import closing, contextmanager
 import hashlib
 import os
 import sys
 import tempfile
 import time
+from contextlib import closing, contextmanager
 
 import requests
-from twitter.common.lang import Compatibility
+import six
 
 from pants.util.dirutil import safe_open
 
@@ -36,10 +36,11 @@ class Fetcher(object):
     Retrying operations that raise these errors is unlikely to succeed.  For example, an HTTP 404
     response code is considered a permanent error.
     """
+
     def __init__(self, value=None, response_code=None):
       super(Fetcher.PermanentError, self).__init__(value)
-      if response_code and not isinstance(response_code, Compatibility.integer):
-        raise ValueError('response_code must be an integer, got %s' % response_code)
+      if response_code and not isinstance(response_code, six.integer_types):
+        raise ValueError('response_code must be an integer, got {}'.format(response_code))
       self._response_code = response_code
 
     @property
@@ -104,7 +105,7 @@ class Fetcher(object):
       :param fh: a file handle open for writing
       """
       if not fh or not hasattr(fh, 'write'):
-        raise ValueError('fh must be an open file handle, given %s' % fh)
+        raise ValueError('fh must be an open file handle, given {}'.format(fh))
       self._fh = fh
 
     def recv_chunk(self, data):
@@ -152,8 +153,8 @@ class Fetcher(object):
       :param chunk_size_bytes: The size of data chunks to note progress for, 10 KB by default.
       """
       self._width = width or 50
-      if not isinstance(self._width, Compatibility.integer):
-        raise ValueError('The width must be an integer, given %s' % self._width)
+      if not isinstance(self._width, six.integer_types):
+        raise ValueError('The width must be an integer, given {}'.format(self._width))
       self._chunk_size_bytes = chunk_size_bytes or 10 * 1024
       self._start = time.time()
 
@@ -176,18 +177,18 @@ class Fetcher(object):
         self.chunks = chunk_count
         if self.size:
           sys.stdout.write('\r')
-          sys.stdout.write('%3d%% ' % ((self.read * 1.0 / self.size) * 100))
+          sys.stdout.write('{:3}% '.format(int(self.read * 1.0 / self.size) * 100))
         sys.stdout.write('.' * self.chunks)
         if self.size:
           size_width = len(str(self.download_size))
           downloaded = int(self.read / 1024)
-          sys.stdout.write('%s %s KB' % (' ' * (self._width - self.chunks),
+          sys.stdout.write('{} {} KB'.format(' ' * (self._width - self.chunks),
                                          str(downloaded).rjust(size_width)))
         sys.stdout.flush()
 
     def finished(self):
       if self.chunks > 0:
-        sys.stdout.write(' %.3fs\n' % (time.time() - self._start))
+        sys.stdout.write(' {:.3f}s\n'.format(time.time() - self._start))
         sys.stdout.flush()
 
   def __init__(self, requests_api=None):
@@ -211,14 +212,14 @@ class Fetcher(object):
     timeout_secs = timeout_secs or 1.0
 
     if not isinstance(listener, self.Listener):
-      raise ValueError('listener must be a Listener instance, given %s' % listener)
+      raise ValueError('listener must be a Listener instance, given {}'.format(listener))
 
     try:
       with closing(self._requests.get(url, stream=True, timeout=timeout_secs)) as resp:
         if resp.status_code != requests.codes.ok:
           listener.status(resp.status_code)
-          raise self.PermanentError('GET request to %s failed with status code %d'
-                                    % (url, resp.status_code),
+          raise self.PermanentError('GET request to {} failed with status code {}'
+                                    .format(url, resp.status_code),
                                     response_code=resp.status_code)
 
         size = resp.headers.get('content-length')
@@ -229,12 +230,12 @@ class Fetcher(object):
           listener.recv_chunk(data)
           read_bytes += len(data)
         if size and read_bytes != int(size):
-          raise self.Error('Expected %s bytes, read %d' % (size, read_bytes))
+          raise self.Error('Expected {} bytes, read {}'.format(size, read_bytes))
         listener.finished()
     except requests.RequestException as e:
       exception_factory = (self.TransientError if isinstance(e, self._TRANSIENT_EXCEPTION_TYPES)
                            else self.PermanentError)
-      raise exception_factory('Problem GETing data from %s: %s' % (url, e))
+      raise exception_factory('Problem GETing data from {}: {}'.format(url, e))
 
   def download(self, url, listener=None, path_or_fd=None, chunk_size_bytes=None, timeout_secs=None):
     """Downloads data from the given URL.
@@ -251,7 +252,7 @@ class Fetcher(object):
     """
     @contextmanager
     def download_fp(_path_or_fd):
-      if _path_or_fd and not isinstance(_path_or_fd, Compatibility.string):
+      if _path_or_fd and not isinstance(_path_or_fd, six.string_types):
         yield _path_or_fd, _path_or_fd.name
       else:
         if not _path_or_fd:

@@ -2,16 +2,12 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from twitter.common.lang import Compatibility
-
-from pants.base.address import SyntheticAddress
-from pants.base.build_environment import get_buildroot
 from pants.base.payload import Payload
-from pants.base.payload_field import combine_hashes, PayloadField, PrimitiveField, SourcesField
-from pants.base.target import Target
+from pants.base.payload_field import PayloadField, PrimitiveField, combine_hashes
+from pants.build_graph.target import Target
 
 
 class WikiArtifact(object):
@@ -47,7 +43,7 @@ class Wiki(object):
 
 
 class Page(Target):
-  """Describes a single documentation page.
+  """A documentation page.
 
   Here is an example, that shows a markdown page providing a wiki page on an Atlassian Confluence
   wiki: ::
@@ -74,12 +70,15 @@ class Page(Target):
                address=None,
                payload=None,
                source=None,
+               format=None,
                links=None,
                resources=None,
                provides=None,
                **kwargs):
     """
-    :param source: Source of the page in markdown format.
+    :param source: Path to page source file.
+    :param format: Page's format, ``md`` or ``rst``. By default, Pants infers from ``source`` file
+       extension: ``.rst`` is ReStructured Text; anything else is Markdown.
     :param links: Other ``page`` targets that this `page` links to.
     :type links: List of target specs
     :param provides: Optional "Addresses" at which this page is published.
@@ -88,9 +87,16 @@ class Page(Target):
     :param resources: An optional list of Resources objects.
     """
     payload = payload or Payload()
+    if not format:
+      if source and source.lower().endswith('.rst'):
+        format = 'rst'
+      else:
+        format = 'md'
     payload.add_fields({
-      'sources': SourcesField(sources=[source],
-                              sources_rel_path=address.spec_path),
+      'sources': self.create_sources_field(sources=[source],
+                                           sources_rel_path=address.spec_path,
+                                           key_arg='sources'),
+      'format': PrimitiveField(format),
       'links': PrimitiveField(links or []),
       'provides': self.ProvidesTupleField(provides or []),
     })
@@ -98,7 +104,7 @@ class Page(Target):
     super(Page, self).__init__(address=address, payload=payload, **kwargs)
 
     if provides and not isinstance(provides[0], WikiArtifact):
-      raise ValueError('Page must provide a wiki_artifact. Found instead: %s' % provides)
+      raise ValueError('Page must provide a wiki_artifact. Found instead: {}'.format(provides))
 
   @property
   def source(self):
@@ -107,7 +113,7 @@ class Page(Target):
 
   @property
   def traversable_dependency_specs(self):
-    for spec in super(Page, self).traversable_specs:
+    for spec in super(Page, self).traversable_dependency_specs:
       yield spec
     for resource_spec in self._resource_specs:
       yield resource_spec
@@ -127,3 +133,8 @@ class Page(Target):
     list.
     """
     return self.payload.provides
+
+  @property
+  def format(self):
+    """Returns this page's format, 'md' (Markdown) or 'rst' (ReStructured Text)."""
+    return self.payload.format

@@ -28,53 +28,53 @@ Debugging a BUILD File
 If you're curious to know how Pants interprets your `BUILD` file, these
 techniques can be especially helpful:
 
-*Did I define the targets I meant to?* Use `goal list`:
+*Did I define the targets I meant to?* Use `list`:
 
     :::bash
-    $ ./pants goal list examples/src/java/com/pants/examples/hello/greet
-    examples/src/java/com/pants/examples/hello/greet:greet
+    $ ./pants list examples/src/java/org/pantsbuild/example/hello/greet
+    examples/src/java/org/pantsbuild/example/hello/greet:greet
 
 *Did a change in one `BUILD` file break others?*
 List **every** target to find out:
-Use the recursive wildcard: `goal list ::`
+Use the recursive wildcard: `list ::`
 
     :::bash
-    $ ./pants goal list ::
+    $ ./pants list ::
       ...lots of output...
       File "pants/commands/command.py", line 79, in __init__
       File "pants/commands/goal_runner.py", line 144, in setup_parser
       File "pants/base/build_graph.py", line 351, in inject_address_closure
-    TransitiveLookupError: great was not found in BUILD file examples/src/java/com/pants/examples/h
+    TransitiveLookupError: great was not found in BUILD file examples/src/java/org/pantsbuild/example/h
     ello/greet/BUILD. Perhaps you meant:
       :greet
-      referenced from examples/src/scala/com/pants/example/hello/welcome:welcome
+      referenced from examples/src/scala/org/pantsbuild/example/hello/welcome:welcome
     $ # Instead of listing all targets, an error message. We found a problem
 
-*Do I pull in the dependencies I expect?* Use `goal depmap` (JVM languages only):
+*Do I pull in the dependencies I expect?* Use `depmap` (JVM languages only):
 
     :::bash
-    $ ./pants goal depmap examples/tests/java/com/pants/examples/hello/greet
-    internal-examples.tests.java.com.pants.examples.hello.greet.greet
+    $ ./pants depmap examples/tests/java/org/pantsbuild/example/hello/greet
+    internal-examples.tests.java.org.pantsbuild.example.hello.greet.greet
       internal-3rdparty.junit
         internal-3rdparty.hamcrest-core
           org.hamcrest-hamcrest-core-1.3
         junit-junit-dep-4.11
-      internal-examples.src.java.com.pants.examples.hello.greet.greet
-      internal-examples.src.resources.com.pants.example.hello.hello
+      internal-examples.src.java.org.pantsbuild.example.hello.greet.greet
+      internal-examples.src.resources.org.pantsbuild.example.hello.hello
       junit-junit-dep-4.11
       org.hamcrest-hamcrest-core-1.3
 
-*What source files do I depend on?* Use `goal filedeps`:
+*What source files do I depend on?* Use `filedeps`:
 
     :::bash
-    $ ./pants goal filedeps examples/src/java/com/pants/examples/hello/main
-    ~archie/workspace/pants/examples/src/resources/com/pants/example/hello/BUILD
-    ~archie/workspace/pants/examples/src/java/com/pants/examples/hello/main/BUILD
-    ~archie/workspace/pants/examples/src/java/com/pants/examples/hello/main/config/greetee.txt
-    ~archie/workspace/pants/examples/src/java/com/pants/examples/hello/greet/Greeting.java
-    ~archie/workspace/pants/examples/src/resources/com/pants/example/hello/world.txt
-    ~archie/workspace/pants/examples/src/java/com/pants/examples/hello/main/HelloMain.java
-    ~archie/workspace/pants/examples/src/java/com/pants/examples/hello/greet/BUILD
+    $ ./pants filedeps examples/src/java/org/pantsbuild/example/hello/main
+    ~archie/workspace/pants/examples/src/resources/org/pantsbuild/example/hello/BUILD
+    ~archie/workspace/pants/examples/src/java/org/pantsbuild/example/hello/main/BUILD
+    ~archie/workspace/pants/examples/src/java/org/pantsbuild/example/hello/main/config/greetee.txt
+    ~archie/workspace/pants/examples/src/java/org/pantsbuild/example/hello/greet/Greeting.java
+    ~archie/workspace/pants/examples/src/resources/org/pantsbuild/example/hello/world.txt
+    ~archie/workspace/pants/examples/src/java/org/pantsbuild/example/hello/main/HelloMain.java
+    ~archie/workspace/pants/examples/src/java/org/pantsbuild/example/hello/greet/BUILD
 
 Default Target
 --------------
@@ -112,8 +112,8 @@ Default targets are more convenient to reference on the command line. There are 
 It's especially convenient to refer to a default target on the command line. Consider these two
 ways to refer to the same target:
 
-    //src/java/com/pants/tugboat:tugboat  # absolute target name
-    src/java/com/pants/tugboat/           # convenient command-line-completion syntax
+    //src/java/org/pantsbuild/tugboat:tugboat  # absolute target name
+    src/java/org/pantsbuild/tugboat/           # convenient command-line-completion syntax
 
 By providing a default-name target, you make it easier for people to refer to it on the command
 line. This gives them a better experience. BUILD files dependencies can be less verbose,
@@ -360,11 +360,11 @@ Though your repo might contain many `BUILD` files, Pants might not
 execute all of them. If you invoke:
 
     :::bash
-    ./pants goal test examples/tests/java/com/pants/examples/hello/greet:greet
+    ./pants test examples/tests/java/org/pantsbuild/example/hello/greet:greet
 
 Pants executes the source tree's top-level `BUILD` file (executed on
 every Pants run) and
-`examples/tests/java/com/pants/examples/hello/greet/BUILD`. The `greet`
+`examples/tests/java/org/pantsbuild/example/hello/greet/BUILD`. The `greet`
 target depends on targets from other `BUILD` files, so Pants executes
 those `BUILD` files, too; it iterates over the dependency tree,
 executing `BUILD` files as it goes. It does *not* execute `BUILD` files
@@ -388,65 +388,26 @@ A build target defined in `BUILD.foo` can't have the same `name` as a
 build target defined in the same directory's `BUILD` file; they share a
 namespace.
 
-Tag Incompatibilities with exclusives
--------------------------------------
-
-A big code workspace might contain some parts that aren't compatible
-with each other. To make sure that no target tries to use targets that
-don't work together, you can tag those targets with `exclusives`.
-
-For example, suppose that we had two java targets, jliba and jlibb.
-jliba uses `slf4j`, which includes in its jar package an implementation
-of `log4j`. jlibb uses `log4j` directly. But the version of log4j that's
-packaged inside of `slf4j` is different from the version used by jlibb.
-:
-
-    :::python
-    java_library(name='jliba',
-      dependencies = ['3rdparty/jvm/org/slf4j:slf4j-with-log4j-2.4'])
-    java_library(name='jlibb',
-      dependencies=['3rdparty/jvm/log4j:log4j-1.9'])
-    java_binary(name='javabin', dependencies=[':jliba', ':jlibb'])
-
-In this case, the binary target `javabin` depends on both `slf4j` with
-its packaged `log4j` version 2.4, and on `log4j-1.9`. Pants doesn't know
-that the slf4j and log4j `jar_dependencies` contain incompatible
-versions of the same library, and so it can't detect the error.
-
-With exclusives, the `jar_library` target for the joda libraries would
-declare exclusives tags:
-
-    :::python
-    jar_library(name='slf4j-with-log4j-2.4', exclusives={'log4j': '2.4'}, jars=[...])
-    java_library(name='jlibb', exclusives={'log4j': '1.9'}, dependencies=[...])
-
-With the exclusives declared, pants can recognize that 'javabin' has
-conflicting dependencies, and can generate an appropriate error message.
-
 <a pantsmark="build_pants_wrapper_gone"> </a>
 
 What happened to the `pants()` wrapper around targets?
 ------------------------------------------------------
 
 If you have an existing project using Pants and have recently upgraded, you
-may encounter this warning:
+may encounter this exception:
 
-    *** pants() wrapper is obsolete and will be removed in a future release.
+    AddressLookupError: name 'pants' is not defined
 
-or the BUILD may fail an error.
-
-    NameError: name 'pants' is not defined
-
-In pre-release versions of Pants, targets declared in the `dependencies`
-attribute had to be wrapped in a call to the `pants()` method.
+In previous versions of Pants, targets declared in the `dependencies`
+attribute had to be wrapped in a call to the `pants()` method:
 
     :::python
     java_library(name='foo',
         dependencies=[pants('bar')])
 
-The `pants()` method has since been replaced with a noop and as of Pants
-0.0.24 is officially deprecated. The above snippet should be re-written
-to use the target as a plain string.
+The `pants()` method has since been replaced with a noop and as of Pants 0.0.24 is officially
+deprecated. As of pants 0.0.46, use of this method now triggers an exception. Thus, the above
+snippet should be re-written to use the target as a plain string:
 
     :::python
     java_library(name='foo',
@@ -458,41 +419,3 @@ references from your BUILD files with a regular expression.
     :::bash
     # Run this command from the root of your repo.
     $ sed -i "" -e 's/pants(\([^)]*\))/\1/g' `find . -name "BUILD*"`
-
-Using an older version of Pants?
---------------------------------
-
-If you are following along in these examples and are using a version of
-pants prior to the 2014 open source release you might see one of the
-following messages:
-
-From a `python_*` target dependencies attribute:
-
-    AttributeError: 'str' object has no attribute 'resolve'
-
-From a `java_library` dependencies attribute:
-
-    The following targets could not be loaded:
-      src/java/com/twitter/foo/bar/baz =>
-        TargetDefinitionException: Error with src/java/com/foo/bar/baz/BUILD:baz:
-           Expected elements of list to be (<class 'twitter.pants.targets.external_dependency.ExternalDependency'>, <class 'twitter.pants.targets.anonymous.AnonymousDeps'>,
-             <class 'twitter.pants.base.target.Target'>), got value 3rdparty:guava of type <type 'str'>
-
-From a `java_library` resources attribute:
-
-    IOError: [Errno 2] No such file or directory: '/Users/pantsaddict/workspace/src/resources/com/foo/bar'
-
-From a `junit_tests` resources attribute:
-
-    ValueError: Expected elements of list to be <class 'twitter.pants.base.target.Target'>, got value tests/scala/foo/bar/baz/resources of type <type 'str'>
-
-From a `provides` repo attribute:
-
-    ValueError: repo must be Repository or Pants but was foo/bar/baz:baz
-
-All of these errors likely mean that you need to wrap the strings
-mentioned in the error message with the `pants()` wrapper function in
-your BUILD files. The open source Pants release deprecated the use of
-this wrapper and thus examples in this documentation don't include it.
-For more information, see the
-<a pantsref="build_pants_wrapper_gone">`pants` wrapper</a> notes above.

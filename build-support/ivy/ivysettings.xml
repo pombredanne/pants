@@ -5,72 +5,64 @@ Licensed under the Apache License, Version 2.0 (see LICENSE).
 -->
 
 <ivysettings>
-  <property name="root.dir" value="${ivy.settings.dir}/../.." override="false"/>
-  <property name="ivy.cache.dir" value="${user.home}/.ivy2/pants" override="false"/>
-  <properties file="${root.dir}/build.properties" override="false"/>
+  <settings defaultResolver="pants-chain-repos"/>
 
-  <settings defaultResolver="chain-repos"/>
-
-  <macrodef name="_remote_resolvers">
-    <chain returnFirst="true">
-      <ibiblio name="maven2"
-               m2compatible="true"
-               usepoms="true"
-               root="https://repo1.maven.org/maven2/"/>
-
-      <!-- This is just for twitter-hosted jvm tools - kill once they are published to maven
-           central. -->
-      <ibiblio name="maven.twttr.com-maven"
-               m2compatible="true"
-               usepoms="true"
-               root="http://maven.twttr.com/"/>
-    </chain>
-  </macrodef>
-
-  <property name="sbt.repo.relpath" value="[organization]/[module]/[revision]"/>
-  <property name="sbt.repo.artifact" value="${sbt.repo.relpath}/[type]s/[module].[ext]"/>
-  <property name="sbt.repo.pom" value="${sbt.repo.relpath}/poms/[module].pom"/>
   <property name="m2.repo.relpath" value="[organisation]/[module]/[revision]"/>
   <property name="m2.repo.pom" value="${m2.repo.relpath}/[module]-[revision].pom"/>
   <property name="m2.repo.artifact"
-            value="${m2.repo.relpath}/[artifact]-[revision](-[classifier]).[ext]"/>
-
-  <property name="sbt.repo.dir" value="${user.home}/.ivy2/local" override="false"/>
+            value="${m2.repo.relpath}/[artifact](-[classifier])-[revision].[ext]"/>
   <property name="m2.repo.dir" value="${user.home}/.m2/repository" override="false"/>
 
+  <!-- This dance to set ANDROID_HOME seems more complex than it need be, but an absolute path is
+       needed whether or not the ANDROID_HOME env var is set and just using the following does
+       not work to default the value when unset in the environment:
+
+       <properties environment="env"/>
+       <property name="env.ANDROID_HOME" value="/please-export-your-ANDROID_HOME" override="false"/>
+
+       -->
+  <properties environment="env"/>
+  <property name="ANDROID_HOME"
+            value="/please-export-your-ANDROID_HOME"
+            unlessset="env.ANDROID_HOME"/>
+  <property name="ANDROID_HOME"
+            value="${env.ANDROID_HOME}"
+            ifset="env.ANDROID_HOME"/>
+
+  <property name="android.repo.dir" value="${ANDROID_HOME}/extras/android/m2repository"/>
+  <property name="google.repo.dir" value="${ANDROID_HOME}/extras/google/m2repository"/>
+
   <resolvers>
-    <chain name="chain-repos" returnFirst="true">
-      <_remote_resolvers name="remote-repos"/>
 
-      <!-- Fall back to local repositories
+    <chain name="pants-chain-repos" returnFirst="true">
+      <!-- By default ivy does not require metadata (or successful metadata downloads).
+           This can lead to jars downloading without their transitive deps which leads
+           to confusing failures later when classpaths are constructed and used.
+           We setup the maven central resolver to require successful pom downloads here. -->
+      <ibiblio name="maven-central" m2compatible="true" descriptor="required"/>
 
-           NB: there is deep ivy magic working here and many stars must align to get -SNAPSHOTs
-           picked up as they change:
-           1.) A filesystem resolver must be used (as opposed to an ibiblio resolver with a file
-               url).
-           2.) The filesystem resolver ivy pattern must be a pom pattern and [module] must be used
-               as the name (<artifactId>) component in the pom basename (as opposed to [artifact]).
-               Its this bit that correctly gets transitive resolution working.
-           3.) A custom cache with useOrigin="true" must be rigged - the default cache and the cache
-               create via the ivy CLI with -cache do not useOrigin.  Its this bit combined with 1
-               that provides a direct link to the local repo pom and jar.
-      -->
+      <!-- NB: Although url resolvers (like <ibiblio/>) can be pointed at local file:// system
+           URLs, this leads to issues resolving any <dependency/> with a custom artifact that
+           defines a file:// url itself.  We stick to <filesystem/> resolvers here for the
+           two android SDK resolvers as a result. -->
 
-      <!-- sbt standard -->
-      <filesystem name="local.sbt" m2compatible="false" local="true" checkmodified="true">
-        <ivy pattern="${sbt.repo.dir}/${sbt.repo.pom}"/>
-        <artifact pattern="${sbt.repo.dir}/${sbt.repo.artifact}"/>
+      <!-- Android SDK Support Library, found in reference to the ANDROID_HOME variable. -->
+      <filesystem name="local.android" m2compatible="true" local="true">
+        <ivy pattern="${android.repo.dir}/${m2.repo.pom}"/>
+        <artifact pattern="${android.repo.dir}/${m2.repo.artifact}"/>
       </filesystem>
 
-      <!-- mvn standard -->
+      <!-- Google Libraries for the Android SDK, found in reference to ANDROID_HOME. -->
+      <filesystem name="local.google" m2compatible="true" local="true">
+        <ivy pattern="${google.repo.dir}/${m2.repo.pom}"/>
+        <artifact pattern="${google.repo.dir}/${m2.repo.artifact}"/>
+      </filesystem>
+
+      <!-- The mvn standard local filesystem repo/cache -->
       <filesystem name="local.m2" m2compatible="true" local="true" checkmodified="true">
         <ivy pattern="${m2.repo.dir}/${m2.repo.pom}"/>
         <artifact pattern="${m2.repo.dir}/${m2.repo.artifact}"/>
       </filesystem>
     </chain>
   </resolvers>
-
-  <caches default="default" lockStrategy="no-lock" useOrigin="true">
-    <cache name="default" basedir="${ivy.cache.dir}"/>
-  </caches>
 </ivysettings>

@@ -2,8 +2,8 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import errno
 import os
@@ -20,12 +20,17 @@ class ArtifactError(Exception):
 
 class Artifact(object):
   """Represents a set of files in an artifact."""
+
   def __init__(self, artifact_root):
     # All files must be under this root.
     self._artifact_root = artifact_root
 
     # The files known to be in this artifact, relative to artifact_root.
     self._relpaths = set()
+
+  def exists(self):
+    """:returns True if the artifact is available for extraction."""
+    raise NotImplementedError()
 
   def get_paths(self):
     for relpath in self._relpaths:
@@ -45,9 +50,13 @@ class Artifact(object):
 
 class DirectoryArtifact(Artifact):
   """An artifact stored as loose files under a directory."""
+
   def __init__(self, artifact_root, directory):
-    Artifact.__init__(self, artifact_root)
+    super(DirectoryArtifact, self).__init__(artifact_root)
     self._directory = directory
+
+  def exists(self):
+    return os.path.exists(self._directory)
 
   def collect(self, paths):
     for path in paths or ():
@@ -73,19 +82,21 @@ class DirectoryArtifact(Artifact):
 
 class TarballArtifact(Artifact):
   """An artifact stored in a tarball."""
-  def __init__(self, artifact_root, tarfile, compression=9):
-    Artifact.__init__(self, artifact_root)
-    self._tarfile = tarfile
+
+  def __init__(self, artifact_root, tarfile_, compression=9):
+    super(TarballArtifact, self).__init__(artifact_root)
+    self._tarfile = tarfile_
     self._compression = compression
+
+  def exists(self):
+    return os.path.isfile(self._tarfile)
 
   def collect(self, paths):
     # In our tests, gzip is slightly less compressive than bzip2 on .class files,
     # but decompression times are much faster.
-    mode = 'w:gz' if self._compression else 'w'
+    mode = 'w:gz'
 
-    tar_kwargs = {'dereference': True, 'errorlevel': 2}
-    if self._compression:
-      tar_kwargs['compresslevel'] = self._compression
+    tar_kwargs = {'dereference': True, 'errorlevel': 2, 'compresslevel': self._compression}
 
     with open_tar(self._tarfile, mode, **tar_kwargs) as tarout:
       for path in paths or ():
@@ -121,4 +132,4 @@ class TarballArtifact(Artifact):
         tarin.extractall(self._artifact_root)
         self._relpaths.update(paths)
     except tarfile.ReadError as e:
-      raise ArtifactError(e.message)
+      raise ArtifactError(str(e))

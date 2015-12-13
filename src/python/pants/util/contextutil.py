@@ -2,19 +2,20 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from contextlib import closing, contextmanager
 import os
 import shutil
+import sys
 import tarfile
 import tempfile
 import time
 import uuid
 import zipfile
+from contextlib import closing, contextmanager
 
-from twitter.common.lang import Compatibility
+from six import string_types
 
 from pants.util.dirutil import safe_delete
 
@@ -48,15 +49,28 @@ def environment_as(**kwargs):
 
 
 @contextmanager
-def temporary_dir(root_dir=None, cleanup=True):
+def stdio_as(stdout, stderr, stdin=None):
+  """Redirect sys.{stdout, stderr, stdin} to alternate file-like objects."""
+  old_stdout, sys.stdout = sys.stdout, stdout
+  old_stderr, sys.stderr = sys.stderr, stderr
+  if stdin:
+    old_stdin, sys.stdin = sys.stdin, stdin
+  yield
+  sys.stdout, sys.stderr = old_stdout, old_stderr
+  if stdin:
+    sys.stdin = old_stdin
+
+
+@contextmanager
+def temporary_dir(root_dir=None, cleanup=True, suffix=str()):
   """
     A with-context that creates a temporary directory.
 
     You may specify the following keyword args:
-    :param str root_dir: The parent directory to create the temporary directory.
+    :param string root_dir: The parent directory to create the temporary directory.
     :param bool cleanup: Whether or not to clean up the temporary directory.
   """
-  path = tempfile.mkdtemp(dir=root_dir)
+  path = tempfile.mkdtemp(dir=root_dir, suffix=suffix)
   try:
     yield path
   finally:
@@ -142,7 +156,8 @@ def open_zip(path_or_file, *args, **kwargs):
     A with-context for zip files.  Passes through positional and kwargs to zipfile.ZipFile.
   """
   try:
-    zf = zipfile.ZipFile(path_or_file, *args, **kwargs)
+    allowZip64 = kwargs.pop('allowZip64', True)
+    zf = zipfile.ZipFile(path_or_file, *args, allowZip64=allowZip64, **kwargs)
   except zipfile.BadZipfile as bze:
     raise zipfile.BadZipfile("Bad Zipfile {0}: {1}".format(path_or_file, bze))
   try:
@@ -158,7 +173,7 @@ def open_tar(path_or_file, *args, **kwargs):
 
     If path_or_file is a file, caller must close it separately.
   """
-  (path, fileobj) = ((path_or_file, None) if isinstance(path_or_file, Compatibility.string)
+  (path, fileobj) = ((path_or_file, None) if isinstance(path_or_file, string_types)
                      else (None, path_or_file))
   with closing(tarfile.open(path, *args, fileobj=fileobj, **kwargs)) as tar:
     yield tar

@@ -2,10 +2,10 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from collections import namedtuple, defaultdict
+from collections import defaultdict, namedtuple
 
 from pants.goal.goal import Goal
 
@@ -34,10 +34,10 @@ class RoundManager(object):
     self._context = context
     self._producer_infos_by_product_type = None
 
-  def require(self, product_type, predicate=None):
+  def require(self, product_type):
     """Schedules the tasks that produce product_type to be executed before the requesting task."""
     self._dependencies.add(product_type)
-    self._context.products.require(product_type, predicate)
+    self._context.products.require(product_type)
 
   def require_data(self, product_type):
     """Schedules the tasks that produce product_type to be executed before the requesting task."""

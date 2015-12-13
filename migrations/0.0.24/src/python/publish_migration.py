@@ -3,11 +3,21 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
+
+
 import os
 import re
 import sys
 
+
+if len(sys.argv) != 3:
+  print("Usage: publish_migration.py <publish.properties> <directory to write new files>")
+  exit(1)
+
 filename = sys.argv[1]
+new_base_dir = sys.argv[2]
 
 def extract_artifact(line):
   splitline = line.split('%')
@@ -16,7 +26,6 @@ def extract_artifact(line):
   return (org, name)
 
 with open(filename) as f:
-  base_dir = os.path.dirname(filename)
 
   content = f.readlines()
   for line in content:
@@ -25,7 +34,7 @@ with open(filename) as f:
     artifact = extract_artifact(line)
     (org, name) = artifact
 
-    publish_dir = os.path.join(base_dir, org, name)
+    publish_dir = os.path.join(new_base_dir, org, name)
     if not os.path.exists(publish_dir):
       os.makedirs(publish_dir)
 

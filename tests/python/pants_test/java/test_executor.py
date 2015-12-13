@@ -2,18 +2,18 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from contextlib import contextmanager
 import os
 import subprocess
 import textwrap
-import unittest2 as unittest
+import unittest
+from contextlib import contextmanager
 
 from pants.java.distribution.distribution import Distribution
-from pants.java.executor import SubprocessExecutor
-from pants.util.contextutil import temporary_dir, environment_as
+from pants.java.executor import Executor, SubprocessExecutor
+from pants.util.contextutil import environment_as, temporary_dir
 from pants.util.dirutil import chmod_plus_x, safe_open
 
 
@@ -25,8 +25,9 @@ class SubprocessExecutorTest(unittest.TestCase):
       with safe_open(path, 'w') as fp:
         fp.write(textwrap.dedent("""
             #!/bin/sh
-            echo ${env_var}
-          """.format(env_var=env_var)).strip())
+            echo ${env_var} >&2
+            echo "java.home={java_home}"
+          """.format(env_var=env_var, java_home=jre)).strip())
       chmod_plus_x(path)
       yield jre
 
@@ -39,9 +40,9 @@ class SubprocessExecutorTest(unittest.TestCase):
                                  main='dummy.main',
                                  stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE)
-        stdout, _ = process.communicate()
+        _, stderr = process.communicate()
         self.assertEqual(0, process.returncode)
-        self.assertEqual('' if scrubbed else env_value, stdout.strip())
+        self.assertEqual('' if scrubbed else env_value, stderr.strip())
 
   def test_not_scrubbed(self):
     self.do_test_jre_env_var('FRED', 'frog', scrubbed=False)
@@ -72,3 +73,15 @@ class SubprocessExecutorTest(unittest.TestCase):
   def test_subprocess_classpath_relativize(self):
     with self.jre("FOO") as jre:
       self.do_test_executor_classpath_relativize(SubprocessExecutor(Distribution(bin_path=jre)))
+
+  def test_fails_with_bad_distribution(self):
+
+    class DefinitelyNotADistribution(object):
+      pass
+
+    with self.assertRaises(Executor.InvalidDistribution):
+      SubprocessExecutor(DefinitelyNotADistribution())
+
+  def test_fails_with_no_distribution(self):
+    with self.assertRaises(Executor.InvalidDistribution):
+      SubprocessExecutor(None)

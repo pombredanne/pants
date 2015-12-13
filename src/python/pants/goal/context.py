@@ -2,29 +2,27 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import os
 import sys
 from collections import defaultdict
 from contextlib import contextmanager
 
-from pants.base.address import SyntheticAddress
+from twitter.common.collections import OrderedSet
+
 from pants.base.build_environment import get_buildroot, get_scm
-from pants.base.build_graph import BuildGraph
-from pants.base.source_root import SourceRoot
-from pants.base.target import Target
-from pants.base.workunit import WorkUnit
+from pants.base.worker_pool import SubprocPool
+from pants.base.workunit import WorkUnitLabel
+from pants.build_graph.build_graph import BuildGraph
+from pants.build_graph.target import Target
 from pants.goal.products import Products
 from pants.goal.workspace import ScmWorkspace
-from pants.java.distribution.distribution import Distribution
 from pants.process.pidlock import OwnerPrintingPIDLockFile
 from pants.reporting.report import Report
-from pants.base.worker_pool import SubprocPool
+from pants.source.source_root import SourceRootConfig
 
-# Override with ivy -> cache_dir
-_IVY_CACHE_DIR_DEFAULT=os.path.expanduser('~/.ivy2/pants')
 
 class Context(object):
   """Contains the context for a single run of pants.
@@ -38,6 +36,7 @@ class Context(object):
 
   class Log(object):
     """A logger facade that logs into the pants reporting framework."""
+
     def __init__(self, run_tracker):
       self._run_tracker = run_tracker
 
@@ -58,20 +57,20 @@ class Context(object):
 
   # TODO: Figure out a more structured way to construct and use context than this big flat
   # repository of attributes?
-  def __init__(self, config, new_options, run_tracker, target_roots,
-               requested_goals=None, log=None, target_base=None, build_graph=None,
+  def __init__(self, options, run_tracker, target_roots,
+               requested_goals=None, target_base=None, build_graph=None,
                build_file_parser=None, address_mapper=None, console_outstream=None, scm=None,
-               workspace=None, spec_excludes=None):
-    self._config = config
-    self._new_options = new_options
+               workspace=None, spec_excludes=None, invalidation_report=None):
+    self._options = options
     self.build_graph = build_graph
     self.build_file_parser = build_file_parser
     self.address_mapper = address_mapper
     self.run_tracker = run_tracker
-    self._log = log or Context.Log(run_tracker)
+    self._log = self.Log(run_tracker)
     self._target_base = target_base or Target
     self._products = Products()
     self._buildroot = get_buildroot()
+    self._source_roots = SourceRootConfig.global_instance().get_source_roots()
     self._lock = OwnerPrintingPIDLockFile(os.path.join(self._buildroot, '.pants.run'))
     self._java_sysprops = None  # Computed lazily.
     self.requested_goals = requested_goals or []
@@ -79,17 +78,14 @@ class Context(object):
     self._scm = scm or get_scm()
     self._workspace = workspace or (ScmWorkspace(self._scm) if self._scm else None)
     self._spec_excludes = spec_excludes
-    self.replace_targets(target_roots)
+    self._replace_targets(target_roots)
+    self._synthetic_targets = defaultdict(list)
+    self._invalidation_report = invalidation_report
 
   @property
-  def config(self):
-    """Returns a Config object containing the configuration data found in pants.ini."""
-    return self._config
-
-  @property
-  def new_options(self):
+  def options(self):
     """Returns the new-style options."""
-    return self._new_options
+    return self._options
 
   @property
   def log(self):
@@ -100,6 +96,11 @@ class Context(object):
   def products(self):
     """Returns the Products manager for the current run."""
     return self._products
+
+  @property
+  def source_roots(self):
+    """Returns the :class:`pants.source.source_root.SourceRoots` instance for the current run."""
+    return self._source_roots
 
   @property
   def target_roots(self):
@@ -127,44 +128,16 @@ class Context(object):
     return self._workspace
 
   @property
-  def java_sysprops(self):
-    """The system properties of the JVM we use."""
-    # TODO: In the future we can use these to hermeticize the Java enivronment rather than relying
-    # on whatever's on the shell's PATH. E.g., you either specify a path to the Java home via a
-    # cmd-line flag or .pantsrc, or we infer one from java.home but verify that the java.version
-    # is a supported version.
-    if self._java_sysprops is None:
-      # TODO(John Sirois): Plumb a sane default distribution through 1 point of control
-      self._java_sysprops = Distribution.cached().system_properties
-    return self._java_sysprops
-
-  @property
-  def java_home(self):
-    """Find the java home for the JVM we use."""
-    # Implementation is a kind-of-insane hack: we run the jvm to get it to emit its
-    # system properties. On some platforms there are so many hard and symbolic links into
-    # the JRE dirs that it's actually quite hard to establish what path to use as the java home,
-    # e.g., for the purpose of rebasing. In practice, this seems to work fine.
-    # Note that for our purposes we take the parent of java.home.
-    return os.path.realpath(os.path.dirname(self.java_sysprops['java.home']))
-
-  @property
-  def ivy_home(self):
-    return os.path.realpath(self.config.get('ivy', 'cache_dir',
-                                            default=_IVY_CACHE_DIR_DEFAULT))
-
-  @property
   def spec_excludes(self):
     return self._spec_excludes
 
+  @property
+  def invalidation_report(self):
+    return self._invalidation_report
+
   def __str__(self):
     ident = Target.identify(self.targets())
-    return 'Context(id:%s, targets:%s)' % (ident, self.targets())
-
-  def submit_foreground_work_and_wait(self, work, workunit_parent=None):
-    """Returns the pool to which tasks can submit foreground (blocking) work."""
-    return self.run_tracker.foreground_worker_pool().submit_work_and_wait(
-      work, workunit_parent=workunit_parent)
+    return 'Context(id:{}, targets:{})'.format(ident, self.targets())
 
   def submit_background_work_chain(self, work_chain, parent_workunit_name=None):
     background_root_workunit = self.run_tracker.get_background_root_workunit()
@@ -174,7 +147,7 @@ class Context(object):
       # This is slightly funky, but the with-context usage is so pervasive and
       # useful elsewhere that it's worth the funkiness in this one place.
       workunit_parent_ctx = self.run_tracker.new_workunit_under_parent(
-        name=parent_workunit_name, labels=[WorkUnit.MULTITOOL], parent=background_root_workunit)
+        name=parent_workunit_name, labels=[WorkUnitLabel.MULTITOOL], parent=background_root_workunit)
       workunit_parent = workunit_parent_ctx.__enter__()
       done_hook = lambda: workunit_parent_ctx.__exit__(None, None, None)
     else:
@@ -200,7 +173,7 @@ class Context(object):
       # NB: in 2.x, wait() with timeout wakes up often to check, burning CPU. Oh well.
       res = SubprocPool.foreground().map_async(f, items)
       while not res.ready():
-        res.wait(60) # Repeatedly wait for up to a minute.
+        res.wait(60)  # Repeatedly wait for up to a minute.
         if not res.ready():
           self.log.debug('subproc_map result still not ready...')
       return res.get()
@@ -209,17 +182,18 @@ class Context(object):
       raise
 
   @contextmanager
-  def new_workunit(self, name, labels=None, cmd=''):
+  def new_workunit(self, name, labels=None, cmd='', log_config=None):
     """Create a new workunit under the calling thread's current workunit."""
-    with self.run_tracker.new_workunit(name=name, labels=labels, cmd=cmd) as workunit:
+    with self.run_tracker.new_workunit(name=name, labels=labels, cmd=cmd, log_config=log_config) as workunit:
       yield workunit
 
   def acquire_lock(self):
     """ Acquire the global lock for the root directory associated with this context. When
     a goal requires serialization, it will call this to acquire the lock.
     """
-    if not self._lock.i_am_locking():
-      self._lock.acquire()
+    if self.options.for_global_scope().lock:
+      if not self._lock.i_am_locking():
+        self._lock.acquire()
 
   def release_lock(self):
     """Release the global lock if it's held.
@@ -235,43 +209,78 @@ class Context(object):
     """Whether the global lock object is actively holding the lock."""
     return not self._lock.i_am_locking()
 
-  def replace_targets(self, target_roots):
-    """Replaces all targets in the context with the given roots and their transitive
-    dependencies.
-    """
+  def _replace_targets(self, target_roots):
+    # Replaces all targets in the context with the given roots and their transitive dependencies.
+    #
+    # If another task has already retrieved the current targets, mutable state may have been
+    # initialized somewhere, making it now unsafe to replace targets. Thus callers of this method
+    # must know what they're doing!
+    #
+    # TODO(John Sirois): This currently has 0 uses (outside ContextTest) in pantsbuild/pants and
+    # only 1 remaining known use case in the Foursquare codebase that will be able to go away with
+    # the post RoundEngine engine - kill the method at that time.
     self._target_roots = list(target_roots)
 
-  def add_new_target(self, address, target_type, dependencies=None, **kwargs):
+  def add_new_target(self, address, target_type, target_base=None, dependencies=None,
+                     derived_from=None, **kwargs):
     """Creates a new target, adds it to the context and returns it.
 
     This method ensures the target resolves files against the given target_base, creating the
     directory if needed and registering a source root.
     """
-    target_base = os.path.join(get_buildroot(), address.spec_path)
+    target_base = os.path.join(get_buildroot(), target_base or address.spec_path)
     if not os.path.exists(target_base):
       os.makedirs(target_base)
-    SourceRoot.register(address.spec_path)
+      # TODO: Adding source roots on the fly like this is yucky, but hopefully this
+      # method will go away entirely under the new engine. It's primarily used for injecting
+      # synthetic codegen targets, and that isn't how codegen will work in the future.
+    if not self.source_roots.find_by_path(target_base):
+      self.source_roots.add_source_root(target_base)
     if dependencies:
       dependencies = [dep.address for dep in dependencies]
 
     self.build_graph.inject_synthetic_target(address=address,
                                              target_type=target_type,
                                              dependencies=dependencies,
+                                             derived_from=derived_from,
                                              **kwargs)
-    return self.build_graph.get_target(address)
+    new_target = self.build_graph.get_target(address)
+
+    if derived_from:
+      self._synthetic_targets[derived_from].append(new_target)
+
+    return new_target
 
   def targets(self, predicate=None, postorder=False):
     """Selects targets in-play in this run from the target roots and their transitive dependencies.
 
-    If specified, the predicate will be used to narrow the scope of targets returned.
+    Also includes any new synthetic targets created from the target roots or their transitive
+    dependencies during the course of the run.
 
-    :return: a list of targets evaluated by the predicate in preorder (or postorder, if the
-    postorder parameter is True) traversal order.
+    :param predicate: If specified, the predicate will be used to narrow the scope of targets
+                      returned.
+    :param bool postorder: `True` to gather transitive dependencies with a postorder traversal;
+                          `False` or preorder by default.
+    :returns: A list of matching targets.
     """
-    target_root_addresses = [target.address for target in self._target_roots]
-    target_set = self.build_graph.transitive_subgraph_of_addresses(target_root_addresses,
-                                                                   postorder=postorder)
+    target_set = self._collect_targets(self.target_roots, postorder=postorder)
+
+    synthetics = OrderedSet()
+    for derived_from, synthetic_targets in self._synthetic_targets.items():
+      if derived_from in target_set or derived_from in synthetics:
+        synthetics.update(synthetic_targets)
+
+    synthetic_set = self._collect_targets(synthetics, postorder=postorder)
+
+    target_set.update(synthetic_set)
+
     return filter(predicate, target_set)
+
+  def _collect_targets(self, root_targets, postorder=False):
+    addresses = [target.address for target in root_targets]
+    target_set = self.build_graph.transitive_subgraph_of_addresses(addresses,
+                                                                   postorder=postorder)
+    return target_set
 
   def dependents(self, on_predicate=None, from_predicate=None):
     """Returns  a map from targets that satisfy the from_predicate to targets they depend on that
@@ -287,10 +296,7 @@ class Context(object):
 
   def resolve(self, spec):
     """Returns an iterator over the target(s) the given address points to."""
-    address = SyntheticAddress.parse(spec)
-    # NB: This is an idempotent, short-circuiting call.
-    self.build_graph.inject_address_closure(address)
-    return self.build_graph.transitive_subgraph_of_addresses([address])
+    return self.build_graph.resolve(spec)
 
   def scan(self, root=None):
     """Scans and parses all BUILD files found under ``root``.

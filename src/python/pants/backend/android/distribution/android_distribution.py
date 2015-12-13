@@ -2,54 +2,53 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import os
+import shutil
+
+from pants.util.dirutil import safe_mkdir
 
 
 class AndroidDistribution(object):
-  """
-  Represents the Android SDK on the local system.
-  """
+  """Represent an Android SDK distribution."""
 
-  class Error(Exception):
-    """Indicates an invalid android distribution."""
+  class DistributionError(Exception):
+    """Indicate an invalid android distribution."""
 
   _CACHED_SDK = {}
 
   @classmethod
   def cached(cls, path=None):
-    """
-    Check for cached SDK. If not found, instantiate class and search for local SDK.
+    """Return an AndroidDistribution and cache results.
 
-    :param string path: Optional local address of an SDK, set by user in CLI invocation.
-    :returns: a new :class:``pants.backend.android.distribution.AndroidDistribution``.
+    :param string path: Optional path of an Android SDK installation.
+    :return: An android distribution.
+    :rtype: AndroidDistribution
     """
-    key = path
-    dist = cls._CACHED_SDK.get(key)
+    dist = cls._CACHED_SDK.get(path)
     if not dist:
       dist = cls.locate_sdk_path(path)
-    cls._CACHED_SDK[key] = dist
+      cls._CACHED_SDK[path] = dist
     return dist
 
   @classmethod
   def locate_sdk_path(cls, path=None):
-    """
-    Locate an Android SDK by checking for traditional environmental aliases.
+    """Locate an Android SDK by checking any passed path and then traditional environmental aliases.
 
-    This method returns an AndroidDistribution even if there is no valid SDK on the user's path.
-    There is no verification of valid SDK until an actual tool is requested by a task using
-    AndroidDistribution.register_android_tool()
-
-    :param string path: Optional local address of a SDK, set by user in CLI invocation.
+    :param string path: Optional local address of a SDK.
+    :return: An android distribution.
+    :rtype: AndroidDistribution
+    :raises: ``DistributionError`` if SDK cannot be found.
     """
     def sdk_path(sdk_env_var):
+      """Return the full path of environmental variable sdk_env_var."""
       sdk = os.environ.get(sdk_env_var)
       return os.path.abspath(sdk) if sdk else None
 
     def search_path(path):
-      # Check path if one is passed at instantiation, then check environmental variables
+      """Find a Android SDK home directory."""
       if path:
         yield os.path.abspath(path)
       yield sdk_path('ANDROID_HOME')
@@ -59,38 +58,50 @@ class AndroidDistribution(object):
     for path in filter(None, search_path(path)):
       dist = cls(sdk_path=path)
       return dist
-    dist = cls(sdk_path=None)
-    return dist
+    raise cls.DistributionError('Failed to locate Android SDK. Please install '
+                                'SDK and set ANDROID_HOME in your path.')
 
-  def __init__(self, sdk_path=None):
+  def __init__(self, sdk_path):
     """Create an Android distribution and cache tools for quick retrieval."""
     self._sdk_path = sdk_path
-    self._validated_tools = set()
+    self._validated_tools = {}
 
-  def register_android_tool(self, tool_path):
-    """Check tool_path and see if it is installed in the local Android SDK.
+  def register_android_tool(self, tool_path, workdir=None):
+    """Return the full path for the tool at SDK location tool_path or of a copy under workdir.
 
-    All android tasks should request their tools using this method. Tools are validated
-    and cached for quick lookup. This is where the _sdk_path is validated.
-
+    All android tasks should request their tools using this method.
     :param string tool_path: Path to tool, relative to the Android SDK root, e.g
       'platforms/android-19/android.jar'.
+    :param string workdir: Location for the copied file. Pants will put a copy of the
+      android file under workdir.
+    :return: Full path to either the tool or a created copy of that tool.
+    :rtype: string
+    :raises: ``DistributionError`` if tool cannot be found.
     """
-    try:
-      android_tool = os.path.join(self._sdk_path, tool_path)
-    except:
-      raise AndroidDistribution.Error('Failed to locate Android SDK. Please install SDK and '
-                                      'set ANDROID_HOME in your path')
-    self._register_file(android_tool)
-    return android_tool
+    if tool_path not in self._validated_tools:
+      android_tool = self._get_tool_path(tool_path)
+      # If an android file is bound for the classpath it must be under buildroot, so create a copy.
+      if workdir:
+        copy_path = os.path.join(workdir, tool_path)
+        if not os.path.isfile(copy_path):
+          try:
+            safe_mkdir(os.path.dirname(copy_path))
+            shutil.copy(android_tool, copy_path)
+          except OSError as e:
+            raise self.DistributionError('Problem creating copy of the android tool: {}'.format(e))
+        self._validated_tools[tool_path] = copy_path
+      else:
+        self._validated_tools[tool_path] = android_tool
+    return self._validated_tools[tool_path]
 
-  def _register_file(self, tool):
-    if tool not in self._validated_tools:
-      if not os.path.isfile(tool):
-        raise self.Error('There is no {0!r} installed.The Android SDK may need to be updated'
-                         .format(tool))
-      self._validated_tools.add(tool)
-    return tool
+  def _get_tool_path(self, tool_path):
+    """Return full path of tool if it is found on disk."""
+    android_tool = os.path.join(self._sdk_path, tool_path)
+    if os.path.isfile(android_tool):
+      return android_tool
+    else:
+      raise self.DistributionError('There is no {} installed. The Android SDK may need to be '
+                                   'updated.'.format(android_tool))
 
   def __repr__(self):
-    return ('AndroidDistribution({0!r})'.format(self._sdk_path))
+    return 'AndroidDistribution({})'.format(self._sdk_path)

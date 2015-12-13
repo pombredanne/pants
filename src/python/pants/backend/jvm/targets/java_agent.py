@@ -2,25 +2,23 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from twitter.common.lang import Compatibility
+from six import string_types
 
-from pants.base.exceptions import TargetDefinitionException
-from pants.base.validation import assert_list
 from pants.backend.jvm.targets.java_library import JavaLibrary
+from pants.base.exceptions import TargetDefinitionException
 
 
 class JavaAgent(JavaLibrary):
-  """Defines a java agent entrypoint."""
+  """A Java agent entrypoint."""
 
   def __init__(self,
                name,
                sources=None,
                excludes=None,
                resources=None,
-               exclusives=None,
                premain=None,
                agent_class=None,
                can_redefine=False,
@@ -43,24 +41,23 @@ class JavaAgent(JavaLibrary):
 
     super(JavaAgent, self).__init__(
         name=name,
-        sources=self.assert_list(sources),
+        sources=self.assert_list(sources, key_arg='sources'),
         provides=None,
-        excludes=self.assert_list(excludes),
-        resources=self.assert_list(resources),
-        exclusives=exclusives,
+        excludes=self.assert_list(excludes, key_arg='excludes'),
+        resources=self.assert_list(resources, key_arg='resources'),
         **kwargs)
 
     if not (premain or agent_class):
       raise TargetDefinitionException(self, "Must have at least one of 'premain' or 'agent_class' "
                                             "defined.")
-    if premain and not isinstance(premain, Compatibility.string):
+    if premain and not isinstance(premain, string_types):
       raise TargetDefinitionException(self, 'The premain must be a fully qualified class name, '
-                                            'given %s of type %s' % (premain, type(premain)))
+                                            'given {} of type {}'.format(premain, type(premain)))
 
-    if agent_class and not isinstance(agent_class, Compatibility.string):
+    if agent_class and not isinstance(agent_class, string_types):
       raise TargetDefinitionException(self,
                                       'The agent_class must be a fully qualified class name, given '
-                                      '%s of type %s' % (agent_class, type(agent_class)))
+                                      '{} of type {}'.format(agent_class, type(agent_class)))
 
     self._premain = premain
     self._agent_class = agent_class
@@ -68,6 +65,7 @@ class JavaAgent(JavaLibrary):
     self._can_retransform = can_retransform
     self._can_set_native_method_prefix = can_set_native_method_prefix
 
+    # TODO(Eric Ayers) As of 2/5/2015 this call is DEPRECATED and should be removed soon
     self.add_labels('java_agent')
 
   @property

@@ -2,39 +2,29 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from contextlib import contextmanager
+import os
 import SimpleHTTPServer
 import SocketServer
-import os
-import unittest2 as unittest
+import unittest
+from contextlib import contextmanager
 from threading import Thread
 
-from pants.base.build_invalidator import CacheKey
-from pants.cache.artifact_cache import call_use_cached_files, call_insert
-from pants.cache.cache_setup import (create_artifact_cache, select_best_url, EmptyCacheSpecError,
-                                     LocalCacheSpecRequiredError, CacheSpecFormatError,
-                                     InvalidCacheSpecError, RemoteCacheSpecRequiredError)
+from pants.cache.artifact_cache import call_insert, call_use_cached_files
 from pants.cache.local_artifact_cache import LocalArtifactCache, TempLocalArtifactCache
 from pants.cache.restful_artifact_cache import InvalidRESTfulCacheProtoError, RESTfulArtifactCache
-from pants.util.contextutil import pushd, temporary_dir, temporary_file
+from pants.invalidation.build_invalidator import CacheKey
+from pants.util.contextutil import pushd, temporary_dir, temporary_file, temporary_file_path
 from pants.util.dirutil import safe_mkdir
-from pants_test.testutils.mock_logger import MockLogger
-from pants_test.base.context_utils import create_context
 
-class MockPinger(object):
-  def __init__(self, hosts_to_times):
-    self._hosts_to_times = hosts_to_times
-  # Returns a fake ping time such that the last host is always the 'fastest'.
-  def pings(self, hosts):
-    return map(lambda host: (host, self._hosts_to_times.get(host, 9999)), hosts)
 
 # A very trivial server that serves files under the cwd.
 class SimpleRESTHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
   def __init__(self, request, client_address, server):
     # The base class implements GET and HEAD.
+    # Old-style class, so we must invoke __init__ this way.
     SimpleHTTPServer.SimpleHTTPRequestHandler.__init__(self, request, client_address, server)
 
   def do_HEAD(self):
@@ -59,8 +49,34 @@ class SimpleRESTHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
       self.send_error(404, 'File not found')
     self.end_headers()
 
-TEST_CONTENT1 = 'muppet'
-TEST_CONTENT2 = 'kermit'
+
+class FailRESTHandler(SimpleHTTPServer.SimpleHTTPRequestHandler):
+  """Reject all requests"""
+
+  def __init__(self, request, client_address, server):
+    # Old-style class, so we must invoke __init__ this way.
+    SimpleHTTPServer.SimpleHTTPRequestHandler.__init__(self, request, client_address, server)
+
+  def _return_failed(self):
+    self.send_response(401, 'Forced test failure')
+    self.end_headers()
+
+  def do_HEAD(self):
+    return self._return_failed()
+
+  def do_GET(self):
+    return self._return_failed()
+
+  def do_PUT(self):
+    return self._return_failed()
+
+  def do_DELETE(self):
+    return self._return_failed()
+
+
+TEST_CONTENT1 = b'muppet'
+TEST_CONTENT2 = b'kermit'
+
 
 class TestArtifactCache(unittest.TestCase):
   @contextmanager
@@ -70,13 +86,17 @@ class TestArtifactCache(unittest.TestCase):
         yield LocalArtifactCache(artifact_root, cache_root, compression=0)
 
   @contextmanager
-  def setup_server(self):
+  def setup_server(self, return_failed=False):
     httpd = None
     httpd_thread = None
     try:
       with temporary_dir() as cache_root:
         with pushd(cache_root):  # SimpleRESTHandler serves from the cwd.
-          httpd = SocketServer.TCPServer(('localhost', 0), SimpleRESTHandler)
+          if return_failed:
+            handler = FailRESTHandler
+          else:
+            handler = SimpleRESTHandler
+          httpd = SocketServer.TCPServer(('localhost', 0), handler)
           port = httpd.server_address[1]
           httpd_thread = Thread(target=httpd.serve_forever)
           httpd_thread.start()
@@ -88,10 +108,10 @@ class TestArtifactCache(unittest.TestCase):
         httpd_thread.join()
 
   @contextmanager
-  def setup_rest_cache(self, local=None):
+  def setup_rest_cache(self, local=None, return_failed=False):
     with temporary_dir() as artifact_root:
-      local = local or TempLocalArtifactCache(artifact_root)
-      with self.setup_server() as base_url:
+      local = local or TempLocalArtifactCache(artifact_root, 0)
+      with self.setup_server(return_failed=return_failed) as base_url:
         yield RESTfulArtifactCache(artifact_root, base_url, local)
 
   @contextmanager
@@ -102,54 +122,6 @@ class TestArtifactCache(unittest.TestCase):
       path = f.name
       f.close()
       yield path
-
-  def test_select_best_url(self):
-    spec = 'http://host1|https://host2:666/path/to|http://host3/path/'
-    best = select_best_url(spec, MockPinger({'host1':  5, 'host2:666': 3, 'host3': 7}), MockLogger())
-    self.assertEquals('https://host2:666/path/to', best)
-
-  def test_cache_spec_parsing(self):
-    artifact_root = '/bogus/artifact/root'
-
-    def mk_cache(spec):
-      return create_artifact_cache(MockLogger(), artifact_root, spec,
-                                  'TestTask', compression=1, action='testing')
-
-    def check(expected_type, spec):
-      cache = mk_cache(spec)
-      self.assertTrue(isinstance(cache, expected_type))
-      self.assertEquals(cache.artifact_root, artifact_root)
-
-    with temporary_dir() as tmpdir:
-      cachedir = os.path.join(tmpdir, 'cachedir')  # Must be a real path, so we can safe_mkdir it.
-      check(LocalArtifactCache, cachedir)
-      check(RESTfulArtifactCache, 'http://localhost/bar')
-      check(RESTfulArtifactCache, 'https://localhost/bar')
-      check(RESTfulArtifactCache, [cachedir, 'http://localhost/bar'])
-
-      with self.assertRaises(EmptyCacheSpecError):
-        mk_cache(None)
-
-      with self.assertRaises(EmptyCacheSpecError):
-        mk_cache('')
-
-      with self.assertRaises(CacheSpecFormatError):
-        mk_cache('foo')
-
-      with self.assertRaises(CacheSpecFormatError):
-        mk_cache('../foo')
-
-      with self.assertRaises(LocalCacheSpecRequiredError):
-        mk_cache(['https://localhost/foo', 'http://localhost/bar'])
-
-      with self.assertRaises(RemoteCacheSpecRequiredError):
-        mk_cache([tmpdir, '/bar'])
-
-      with self.assertRaises(InvalidCacheSpecError):
-        mk_cache(4)
-
-      with self.assertRaises(InvalidCacheSpecError):
-        mk_cache([4])
 
   def test_local_cache(self):
     with self.setup_local_cache() as artifact_cache:
@@ -191,7 +163,7 @@ class TestArtifactCache(unittest.TestCase):
     """make sure that the combined cache finds what it should and that it backfills"""
     with self.setup_server() as url:
       with self.setup_local_cache() as local:
-        tmp = TempLocalArtifactCache(local.artifact_root)
+        tmp = TempLocalArtifactCache(local.artifact_root, 0)
         remote = RESTfulArtifactCache(local.artifact_root, url, tmp)
         combined = RESTfulArtifactCache(local.artifact_root, url, local)
 
@@ -231,17 +203,77 @@ class TestArtifactCache(unittest.TestCase):
           self.assertTrue(bool(local.use_cached_files(key)))
 
   def test_multiproc(self):
-    context = create_context()
     key = CacheKey('muppet_key', 'fake_hash', 42)
 
     with self.setup_local_cache() as cache:
-      self.assertEquals(context.subproc_map(call_use_cached_files, [(cache, key)]), [False])
+      self.assertEquals(map(call_use_cached_files, [(cache, key, None)]), [False])
       with self.setup_test_file(cache.artifact_root) as path:
-        context.subproc_map(call_insert, [(cache, key, [path], False)])
-      self.assertEquals(context.subproc_map(call_use_cached_files, [(cache, key)]), [True])
+        map(call_insert, [(cache, key, [path], False)])
+      self.assertEquals(map(call_use_cached_files, [(cache, key, None)]), [True])
 
     with self.setup_rest_cache() as cache:
-      self.assertEquals(context.subproc_map(call_use_cached_files, [(cache, key)]), [False])
+      self.assertEquals(map(call_use_cached_files, [(cache, key, None)]), [False])
       with self.setup_test_file(cache.artifact_root) as path:
-        context.subproc_map(call_insert, [(cache, key, [path], False)])
-      self.assertEquals(context.subproc_map(call_use_cached_files, [(cache, key)]), [True])
+        map(call_insert, [(cache, key, [path], False)])
+      self.assertEquals(map(call_use_cached_files, [(cache, key, None)]), [True])
+
+  def test_failed_multiproc(self):
+    key = CacheKey('muppet_key', 'fake_hash', 55)
+
+    # Failed requests should return failure status, but not raise exceptions
+    with self.setup_rest_cache(return_failed=True) as cache:
+      self.assertFalse(map(call_use_cached_files, [(cache, key, None)])[0])
+      with self.setup_test_file(cache.artifact_root) as path:
+        map(call_insert, [(cache, key, [path], False)])
+      self.assertFalse(map(call_use_cached_files, [(cache, key, None)])[0])
+
+  def test_successful_request_cleans_result_dir(self):
+    key = CacheKey('muppet_key', 'fake_hash', 42)
+
+    with self.setup_local_cache() as cache:
+      self._do_test_successful_request_cleans_result_dir(cache, key)
+
+    with self.setup_rest_cache() as cache:
+      self._do_test_successful_request_cleans_result_dir(cache, key)
+
+  def _do_test_successful_request_cleans_result_dir(self, cache, key):
+    with self.setup_test_file(cache.artifact_root) as path:
+      with temporary_dir() as results_dir:
+        with temporary_file_path(root_dir=results_dir) as canary:
+          map(call_insert, [(cache, key, [path], False)])
+          map(call_use_cached_files, [(cache, key, results_dir)])
+          # Results content should have been deleted.
+          self.assertFalse(os.path.exists(canary))
+
+  def test_failed_request_doesnt_clean_result_dir(self):
+    key = CacheKey('muppet_key', 'fake_hash', 55)
+    with temporary_dir() as results_dir:
+      with temporary_file_path(root_dir=results_dir) as canary:
+        with self.setup_local_cache() as cache:
+          self.assertEquals(
+            map(call_use_cached_files, [(cache, key, results_dir)]),
+            [False])
+          self.assertTrue(os.path.exists(canary))
+
+        with self.setup_rest_cache() as cache:
+          self.assertEquals(
+            map(call_use_cached_files, [(cache, key, results_dir)]),
+            [False])
+          self.assertTrue(os.path.exists(canary))
+
+  def test_corruptted_cached_file_cleaned_up(self):
+    key = CacheKey('muppet_key', 'fake_hash', 42)
+
+    with self.setup_local_cache() as artifact_cache:
+      with self.setup_test_file(artifact_cache.artifact_root) as path:
+        artifact_cache.insert(key, [path])
+        tarfile = artifact_cache._cache_file_for_key(key)
+
+        self.assertTrue(artifact_cache.use_cached_files(key))
+        self.assertTrue(os.path.exists(tarfile))
+
+        with open(tarfile, 'w') as outfile:
+          outfile.write(b'not a valid tgz any more')
+
+        self.assertFalse(artifact_cache.use_cached_files(key))
+        self.assertFalse(os.path.exists(tarfile))

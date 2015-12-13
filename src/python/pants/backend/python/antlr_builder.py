@@ -2,14 +2,14 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import os
-import sys
 
 from pants.backend.python.code_generator import CodeGenerator
 from pants.base.build_environment import get_buildroot
+from pants.base.exceptions import TaskError
 from pants.ivy.bootstrapper import Bootstrapper
 from pants.ivy.ivy import Ivy
 from pants.util.dirutil import safe_mkdir
@@ -19,6 +19,11 @@ class PythonAntlrBuilder(CodeGenerator):
   """
     Antlr builder.
   """
+
+  def __init__(self, ivy_bootstrapper, *args, **kwargs):
+    super(PythonAntlrBuilder, self).__init__(*args, **kwargs)
+    self._ivy_bootstrapper = ivy_bootstrapper
+
   def run_antlrs(self, output_dir):
     # TODO(John Sirois): graduate to a JvmToolTask and/or merge with the java code gen AntlrGen
     # task.
@@ -33,12 +38,10 @@ class PythonAntlrBuilder(CodeGenerator):
       args.append(abs_path)
 
     try:
-      ivy = Bootstrapper.default_ivy()
+      ivy = self._ivy_bootstrapper.ivy()
       ivy.execute(args=args)  # TODO: Needs a workunit, when we have a context here.
-      return True
     except (Bootstrapper.Error, Ivy.Error) as e:
-      print('ANTLR generation failed! %s' % e, file=sys.stderr)
-      return False
+      raise TaskError('ANTLR generation failed! {0}'.format(e))
 
   def generate(self):
     # Create the package structure.

@@ -2,16 +2,14 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-import os
-
-from pants.backend.core.tasks.console_task import ConsoleTask
+from pants.task.console_task import ConsoleTask
 
 
 class Filemap(ConsoleTask):
-  """Outputs a mapping from source file to the target that owns the source file."""
+  """Print a mapping from source file to the target that owns the source file."""
 
   def console_output(self, _):
     visited = set()
@@ -19,7 +17,7 @@ class Filemap(ConsoleTask):
       if target not in visited:
         visited.add(target)
         for rel_source in target.sources_relative_to_buildroot():
-          yield '%s %s' % (rel_source, target.address.spec)
+          yield '{} {}'.format(rel_source, target.address.spec)
 
   def _find_targets(self):
     if len(self.context.target_roots) > 0:

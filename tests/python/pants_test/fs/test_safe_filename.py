@@ -2,13 +2,11 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import os
-import unittest2 as unittest
-
-import pytest
+import unittest
 
 from pants.fs.fs import safe_filename
 
@@ -25,7 +23,7 @@ class SafeFilenameTest(unittest.TestCase):
       return self._size * '*'
 
   def test_bad_name(self):
-    with pytest.raises(ValueError):
+    with self.assertRaises(ValueError):
       safe_filename(os.path.join('more', 'than', 'a', 'name.game'))
 
   def test_noop(self):
@@ -37,5 +35,5 @@ class SafeFilenameTest(unittest.TestCase):
                      safe_filename('jack', '.jill', digest=self.FixedDigest(2), max_length=8))
 
   def test_shorten_fail(self):
-    with pytest.raises(ValueError):
+    with self.assertRaises(ValueError):
       safe_filename('jack', '.beanstalk', digest=self.FixedDigest(3), max_length=12)

@@ -2,7 +2,7 @@ page(
   name='readme',
   source='readme.md',
   links=[
-    ':python_old',
+    ':3rdparty_py',
     'src/docs:first_concepts',
   ]
 )
@@ -16,13 +16,4 @@ page(
 page(
   name='pex_design',
   source='pex_design.md'
-)
-
-page(
-  name='python_old',
-  source='python_old.md',
-  links=[
-    'src/docs:first_concepts',
-    'src/docs:install',
-  ]
 )

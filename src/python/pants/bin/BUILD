@@ -2,51 +2,51 @@
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 python_library(
-  name = 'bin',
-  sources = ['goal_runner.py', 'pants_exe.py'],
-  dependencies = [
-    '3rdparty/python/twitter/commons:twitter.common.lang',
-    '3rdparty/python/twitter/commons:twitter.common.log',
-
-    'src/python/internal_backend/repositories:plugin',
-    'src/python/pants/backend/android:plugin',
-    'src/python/pants/backend/authentication:authentication',
-    'src/python/pants/backend/codegen:plugin',
-    'src/python/pants/backend/core:plugin',
-    'src/python/pants/backend/core/tasks:common',
-    'src/python/pants/backend/core/tasks:task',
-    'src/python/pants/backend/jvm:plugin',
+  name='bin',
+  sources=globs('*.py'),
+  dependencies=[
+    ':plugins',
+    '3rdparty/python:ansicolors',
+    '3rdparty/python:pex',
+    '3rdparty/python:setuptools',
+    '3rdparty/python/twitter/commons:twitter.common.collections',
     'src/python/pants/backend/jvm/tasks:nailgun_task',
-    'src/python/pants/backend/maven_layout:plugin',
-    'src/python/pants/backend/python:plugin',
-    'src/python/pants/base:address',
+    'src/python/pants/backend/python:python_setup',
     'src/python/pants/base:build_environment',
-    'src/python/pants/base:build_file_address_mapper',
-    'src/python/pants/base:build_file_parser',
-    'src/python/pants/base:build_graph',
-    'src/python/pants/base:config',
+    'src/python/pants/base:build_file',
     'src/python/pants/base:cmd_line_spec_parser',
-    'src/python/pants/base:extension_loader',
-    'src/python/pants/base:target',
+    'src/python/pants/base:exceptions',
+    'src/python/pants/base:scm_build_file',
     'src/python/pants/base:workunit',
+    'src/python/pants/build_graph',
     'src/python/pants/engine',
     'src/python/pants/goal',
     'src/python/pants/goal:context',
-    'src/python/pants/goal:initialize_reporting',
     'src/python/pants/goal:run_tracker',
+    'src/python/pants/help',
+    'src/python/pants/logging',
     'src/python/pants/option',
+    'src/python/pants/pantsd/subsystem:pants_daemon_launcher',
     'src/python/pants/reporting',
+    'src/python/pants/subsystem',
+    'src/python/pants/task',
+    'src/python/pants/util:contextutil',
     'src/python/pants/util:dirutil',
+    'src/python/pants/util:filtering',
+    'src/python/pants/util:memo',
+  ],
+)
 
-    # XXX these are necessary to parse BUILD.commons.  Should instead be
-    # added as plugins to pants.ini
-    'src/python/pants/backend/core/tasks:what_changed',
-    'src/python/pants/backend/jvm/targets:java',
-    'src/python/pants/backend/jvm/targets:jvm',
-    'src/python/pants/backend/jvm/targets:scala',
-    'src/python/pants/backend/jvm/tasks:checkstyle',
-    'src/python/pants/backend/python:python_chroot',
-    'src/python/pants/scm:git',
+target(
+  name = 'plugins',
+  dependencies = [
+    'src/python/pants/backend/authentication',
+    'src/python/pants/backend/codegen:plugin',
+    'src/python/pants/backend/core:plugin',
+    'src/python/pants/backend/jvm:plugin',
+    'src/python/pants/backend/project_info:plugin',
+    'src/python/pants/backend/python:plugin',
+    'src/python/pants/core_tasks',
   ],
 )
 
@@ -54,30 +54,23 @@ python_library(
 # pip installers, ie: it is why this works to get `pants` on your PATH:
 # $ pip install pantsbuild.pants
 # $ pants
-# NB: The platforms below are _only_ used when building a pex from this target.  They are
-# not used in the sdist generation.
 python_binary(
-  name = 'pants',
-  entry_point = 'pants.bin.pants_exe:main',
-  # TODO(John Sirois): Nuke this - we don't publish pexes so we need not build cross-platform pexes.
-  platforms=[
-    'current',
-    'linux-x86_64',
-    'macosx-10.4-x86_64',
-  ],
-  compatibility='CPython>=2.7,<3',
-  dependencies = [
+  name='pants',
+  entry_point='pants.bin.pants_exe:main',
+  dependencies=[
     ':bin',
   ],
 )
 
-# This binary is for internal use only.  It adds a dep on internal_backends not meant for
-# publishing in the `pantsbuild.pants` sdist.
+# This binary is for internal use only.  It adds deps on both internal_backends not meant for
+# publishing in the `pantsbuild.pants` sdist as well as deps on backend plugins published as
+# separate sdists from the core `pantsbuild.pants` sdist that this repo uses.
 python_binary(
-  name = 'pants_local_binary',
-  entry_point = 'pants.bin.pants_exe:main',
-  dependencies = [
+  name='pants_local_binary',
+  entry_point='pants.bin.pants_exe:main',
+  dependencies=[
     ':bin',
-    'src/python/internal_backend:plugins',
+    'pants-plugins/src/python/internal_backend:plugins',
+    'src/python/pants/backend/android:plugin',
   ],
 )

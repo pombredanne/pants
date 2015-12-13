@@ -2,16 +2,17 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import os
 import shutil
 import subprocess
 import sys
-import unittest2 as unittest
+import unittest
 
-from pants.util.contextutil import environment_as, pushd, temporary_dir, temporary_file, Timer
+from pants.util.contextutil import (Timer, environment_as, open_zip, pushd, stdio_as, temporary_dir,
+                                    temporary_file)
 
 
 class ContextutilTest(unittest.TestCase):
@@ -109,6 +110,7 @@ class ContextutilTest(unittest.TestCase):
   def test_timer(self):
 
     class FakeClock(object):
+
       def __init__(self):
         self._time = 0.0
 
@@ -135,3 +137,41 @@ class ContextutilTest(unittest.TestCase):
       self.assertTrue(t.finish is None)
     self.assertGreater(t.elapsed, 0.2)
     self.assertLess(t.finish, clock.time())
+
+  def test_open_zipDefault(self):
+    with temporary_dir() as tempdir:
+      with open_zip(os.path.join(tempdir, 'test'), 'w') as zf:
+        self.assertTrue(zf._allowZip64)
+
+  def test_open_zipTrue(self):
+    with temporary_dir() as tempdir:
+      with open_zip(os.path.join(tempdir, 'test'), 'w', allowZip64=True) as zf:
+        self.assertTrue(zf._allowZip64)
+
+  def test_open_zipFalse(self):
+    with temporary_dir() as tempdir:
+      with open_zip(os.path.join(tempdir, 'test'), 'w', allowZip64=False) as zf:
+        self.assertFalse(zf._allowZip64)
+
+  def test_stdio_as(self):
+    old_stdout, old_stderr, old_stdin = sys.stdout, sys.stderr, sys.stdin
+
+    with stdio_as(stdout=1, stderr=2, stdin=3):
+      self.assertEquals(sys.stdout, 1)
+      self.assertEquals(sys.stderr, 2)
+      self.assertEquals(sys.stdin, 3)
+
+    self.assertEquals(sys.stdout, old_stdout)
+    self.assertEquals(sys.stderr, old_stderr)
+    self.assertEquals(sys.stdin, old_stdin)
+
+  def test_stdio_as_stdin_default(self):
+    old_stdout, old_stderr, old_stdin = sys.stdout, sys.stderr, sys.stdin
+
+    with stdio_as(stdout=1, stderr=2):
+      self.assertEquals(sys.stdout, 1)
+      self.assertEquals(sys.stderr, 2)
+      self.assertEquals(sys.stdin, old_stdin)
+
+    self.assertEquals(sys.stdout, old_stdout)
+    self.assertEquals(sys.stderr, old_stderr)

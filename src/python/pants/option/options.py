@@ -2,18 +2,17 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
 import copy
 import sys
 
-from pants.base.build_environment import pants_release
-from pants.goal.goal import Goal
-from pants.option import custom_types
-from pants.option.arg_splitter import ArgSplitter, GLOBAL_SCOPE
+from pants.option.arg_splitter import GLOBAL_SCOPE, ArgSplitter
+from pants.option.global_options import GlobalOptionsRegistrar
 from pants.option.option_value_container import OptionValueContainer
-from pants.option.parser_hierarchy import ParserHierarchy
+from pants.option.parser_hierarchy import ParserHierarchy, enclosing_scope
+from pants.option.scope import ScopeInfo
 
 
 class Options(object):
@@ -60,36 +59,96 @@ class Options(object):
     - The hard-coded value provided at registration time.
     - None.
   """
-  GLOBAL_SCOPE = GLOBAL_SCOPE
 
-  # Custom option types. You can specify these with type= when registering options.
+  class OptionTrackerRequiredError(Exception):
+    """Options requires an OptionTracker instance."""
 
-  # A dict-typed option.
-  dict = staticmethod(custom_types.dict_type)
+  @classmethod
+  def complete_scopes(cls, scope_infos):
+    """Expand a set of scopes to include all enclosing scopes.
 
-  # A list-typed option. Note that this is different than an action='append' option:
-  # An append option will append the cmd-line values to the default. A list-typed option
-  # will replace the default with the cmd-line value.
-  list = staticmethod(custom_types.list_type)
+    E.g., if the set contains `foo.bar.baz`, ensure that it also contains `foo.bar` and `foo`.
+    """
+    ret = {GlobalOptionsRegistrar.get_scope_info()}
+    for scope_info in scope_infos:
+      ret.add(scope_info)
 
+    original_scopes = {si.scope for si in scope_infos}
+    for scope_info in scope_infos:
+      scope = scope_info.scope
+      while scope != '':
+        if scope not in original_scopes:
+          ret.add(ScopeInfo(scope, ScopeInfo.INTERMEDIATE))
+        scope = enclosing_scope(scope)
+    return ret
 
-  def __init__(self, env, config, known_scopes, args=sys.argv, bootstrap_option_values=None):
+  @classmethod
+  def create(cls, env, config, known_scope_infos, args=None, bootstrap_option_values=None,
+             option_tracker=None,):
     """Create an Options instance.
 
     :param env: a dict of environment variables.
     :param config: data from a config file (must support config.get[list](section, name, default=)).
-    :param known_scopes: a list of all possible scopes that may be encountered.
-    :param args: a list of cmd-line args.
+    :param known_scope_infos: ScopeInfos for all scopes that may be encountered.
+    :param args: a list of cmd-line args; defaults to `sys.argv` if None is supplied.
     :param bootstrap_option_values: An optional namespace containing the values of bootstrap
            options. We can use these values when registering other options.
+    :param :class:`pants.option.option_tracker.OptionTracker` option_tracker: option tracker
+           instance to record how option values were assigned.
     """
-    splitter = ArgSplitter(known_scopes)
-    self._goals, self._scope_to_flags, self._target_specs, self._passthru, self._passthru_owner = \
-      splitter.split_args(args)
-    self._is_help = splitter.is_help
-    self._parser_hierarchy = ParserHierarchy(env, config, known_scopes)
-    self._values_by_scope = {}  # Arg values, parsed per-scope on demand.
+    # We need parsers for all the intermediate scopes, so inherited option values
+    # can propagate through them.
+    complete_known_scope_infos = cls.complete_scopes(known_scope_infos)
+    splitter = ArgSplitter(complete_known_scope_infos)
+    args = sys.argv if args is None else args
+    goals, scope_to_flags, target_specs, passthru, passthru_owner = splitter.split_args(args)
+
+    if not option_tracker:
+      raise cls.OptionTrackerRequiredError()
+
+    if bootstrap_option_values:
+      target_spec_files = bootstrap_option_values.target_spec_files
+      if target_spec_files:
+        for spec in target_spec_files:
+          with open(spec) as f:
+            target_specs.extend(filter(None, [line.strip() for line in f]))
+
+    help_request = splitter.help_request
+
+    parser_hierarchy = ParserHierarchy(env, config, complete_known_scope_infos, option_tracker)
+    values_by_scope = {}  # Arg values, parsed per-scope on demand.
+    bootstrap_option_values = bootstrap_option_values
+    known_scope_to_info = {s.scope: s for s in complete_known_scope_infos}
+    return cls(goals, scope_to_flags, target_specs, passthru, passthru_owner, help_request,
+               parser_hierarchy, values_by_scope, bootstrap_option_values, known_scope_to_info,
+               option_tracker)
+
+  def __init__(self, goals, scope_to_flags, target_specs, passthru, passthru_owner, help_request,
+               parser_hierarchy, values_by_scope, bootstrap_option_values, known_scope_to_info,
+               option_tracker):
+    """The low-level constructor for an Options instance.
+
+    Dependees should use `Options.create` instead.
+    """
+    self._goals = goals
+    self._scope_to_flags = scope_to_flags
+    self._target_specs = target_specs
+    self._passthru = passthru
+    self._passthru_owner = passthru_owner
+    self._help_request = help_request
+    self._parser_hierarchy = parser_hierarchy
+    self._values_by_scope = values_by_scope
     self._bootstrap_option_values = bootstrap_option_values
+    self._known_scope_to_info = known_scope_to_info
+    self._option_tracker = option_tracker
+
+  @property
+  def tracker(self):
+    return self._option_tracker
+
+  @property
+  def help_request(self):
+    return self._help_request
 
   @property
   def target_specs(self):
@@ -100,6 +159,40 @@ class Options(object):
   def goals(self):
     """The requested goals, in the order specified on the cmd line."""
     return self._goals
+
+  @property
+  def known_scope_to_info(self):
+    return self._known_scope_to_info
+
+  @property
+  def scope_to_flags(self):
+    return self._scope_to_flags
+
+  def drop_flag_values(self):
+    """Returns a copy of these options that ignores values specified via flags.
+
+    Any pre-cached option values are cleared and only option values that come from option defaults,
+    the config or the environment are used.
+    """
+    # An empty scope_to_flags to force all values to come via the config -> env hierarchy alone
+    # and empty values in case we already cached some from flags.
+    no_flags = {}
+    no_values = {}
+    return Options(self._goals,
+                   no_flags,
+                   self._target_specs,
+                   self._passthru,
+                   self._passthru_owner,
+                   self._help_request,
+                   self._parser_hierarchy,
+                   no_values,
+                   self._bootstrap_option_values,
+                   self._known_scope_to_info,
+                   self._option_tracker)
+
+  def is_known_scope(self, scope):
+    """Whether the given scope is known by this instance."""
+    return scope in self._known_scope_to_info
 
   def passthru_args_for_scope(self, scope):
     # Passthru args "belong" to the last scope mentioned on the command-line.
@@ -122,34 +215,29 @@ class Options(object):
     else:
       return []
 
-  @property
-  def is_help(self):
-    """Whether the command line indicates a request for help."""
-    return self._is_help
-
-  def format_global_help(self):
-    """Generate a help message for global options."""
-    return self.get_global_parser().format_help()
-
-  def format_help(self, scope):
-    """Generate a help message for options at the specified scope."""
-    return self.get_parser(scope).format_help()
-
   def register(self, scope, *args, **kwargs):
-    """Register an option in the given scope, using argparse params."""
+    """Register an option in the given scope."""
     self.get_parser(scope).register(*args, **kwargs)
 
-  def register_global(self, *args, **kwargs):
-    """Register an option in the global scope, using argparse params."""
-    self.register(GLOBAL_SCOPE, *args, **kwargs)
+  def registration_function_for_optionable(self, optionable_class):
+    """Returns a function for registering options on the given scope."""
+    # TODO(benjy): Make this an instance of a class that implements __call__, so we can
+    # docstring it, and so it's less weird than attatching properties to a function.
+    def register(*args, **kwargs):
+      kwargs['registering_class'] = optionable_class
+      self.register(optionable_class.options_scope, *args, **kwargs)
+    # Clients can access the bootstrap option values as register.bootstrap.
+    register.bootstrap = self.bootstrap_option_values()
+    # Clients can access the scope as register.scope.
+    register.scope = optionable_class.options_scope
+    return register
 
   def get_parser(self, scope):
     """Returns the parser for the given scope, so code can register on it directly."""
     return self._parser_hierarchy.get_parser_by_scope(scope)
 
-  def get_global_parser(self):
-    """Returns the parser for the global scope, so code can register on it directly."""
-    return self.get_parser(GLOBAL_SCOPE)
+  def walk_parsers(self, callback):
+    self._parser_hierarchy.walk(callback)
 
   def for_scope(self, scope):
     """Return the option values for the given scope.
@@ -165,13 +253,49 @@ class Options(object):
     if scope == GLOBAL_SCOPE:
       values = OptionValueContainer()
     else:
-      values = copy.deepcopy(self.for_scope(scope.rpartition('.')[0]))
+      values = copy.copy(self.for_scope(enclosing_scope(scope)))
 
     # Now add our values.
     flags_in_scope = self._scope_to_flags.get(scope, [])
     self._parser_hierarchy.get_parser_by_scope(scope).parse_args(flags_in_scope, values)
     self._values_by_scope[scope] = values
+    for option in values:
+      self._option_tracker.record_option(scope=scope, option=option, value=values[option],
+                                         rank=values.get_rank(option))
     return values
+
+  def get_fingerprintable_for_scope(self, scope):
+    """Returns a list of fingerprintable (option type, option value) pairs for the given scope.
+
+    Fingerprintable options are options registered via a "fingerprint=True" kwarg.
+    """
+    pairs = []
+    # Note that we iterate over options registered at `scope` and at all enclosing scopes, since
+    # option-using code can read those values indirectly via its own OptionValueContainer, so
+    # they can affect that code's output.
+    registration_scope = scope
+    while registration_scope is not None:
+      parser = self._parser_hierarchy.get_parser_by_scope(registration_scope)
+      # Sort the arguments, so that the fingerprint is consistent.
+      for (_, kwargs) in sorted(parser.option_registrations_iter()):
+        if kwargs.get('recursive') and not kwargs.get('recursive_root'):
+          continue  # We only need to fprint recursive options once.
+        if kwargs.get('fingerprint') is not True:
+          continue
+        # Note that we read the value from scope, even if the registration was on an enclosing
+        # scope, to get the right value for recursive options (and because this mirrors what
+        # option-using code does).
+        val = self.for_scope(scope)[kwargs['dest']]
+        val_type = kwargs.get('type', '')
+        pairs.append((val_type, val))
+      registration_scope = (None if registration_scope == ''
+                            else enclosing_scope(registration_scope))
+    return pairs
+
+  def __getitem__(self, scope):
+    # TODO(John Sirois): Mainly supports use of dict<str, dict<str, str>> for mock options in tests,
+    # Consider killing if tests consolidate on using TestOptions instead of the raw dicts.
+    return self.for_scope(scope)
 
   def bootstrap_option_values(self):
     """Return the option values for bootstrap options.
@@ -184,46 +308,3 @@ class Options(object):
   def for_global_scope(self):
     """Return the option values for the global scope."""
     return self.for_scope(GLOBAL_SCOPE)
-
-  def print_help(self, msg=None, goals=None):
-    """Print a help screen, followed by an optional message.
-
-    Note: Ony useful if called after options have been registered.
-    """
-    def _maybe_help(scope):
-      s = self.format_help(scope)
-      if s != '':  # Avoid printing scope name for scope with empty options.
-        print(scope)
-        for line in s.split('\n'):
-          if line != '':  # Avoid superfluous blank lines for empty strings.
-            print('  {0}'.format(line))
-
-    goals = goals or self.goals
-    if goals:
-      for goal_name in goals:
-        goal = Goal.by_name(goal_name)
-        if not goal.ordered_task_names():
-          print('\nUnknown goal: %s' % goal_name)
-        else:
-          print('\n{0}: {1}\n'.format(goal.name, goal.description))
-          for scope in goal.known_scopes():
-            _maybe_help(scope)
-    else:
-      print(pants_release())
-      print('\nUsage:')
-      print('  ./pants [option ...] [goal ...] [target...]  Attempt the specified goals.')
-      print('  ./pants help                                 Get help.')
-      print('  ./pants help [goal]                          Get help for the specified goal.')
-      print('  ./pants goal goals                           List all installed goals.')
-      print('')
-      print('  [target] accepts two special forms:')
-      print('    dir:  to include all targets in the specified directory.')
-      print('    dir:: to include all targets found recursively under the directory.')
-
-      print('\nFriendly docs:\n  http://pantsbuild.github.io/')
-
-      print('\nGlobal options:')
-      print(self.format_global_help())
-
-    if msg is not None:
-      print(msg)

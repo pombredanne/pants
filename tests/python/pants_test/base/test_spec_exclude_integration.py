@@ -2,14 +2,14 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from contextlib import contextmanager
 import os
-from shutil import rmtree
 import subprocess
 import tempfile
+from contextlib import contextmanager
+from shutil import rmtree
 
 from pants.base.build_environment import get_buildroot
 from pants_test.pants_run_integration_test import PantsRunIntegrationTest
@@ -18,9 +18,10 @@ from pants_test.pants_run_integration_test import PantsRunIntegrationTest
 class Bundles(object):
   """Container class to hold test bundle specifications."""
 
-  phrase_path = 'testprojects/src/java/com/pants/testproject/phrases'
+  phrase_path = 'testprojects/src/java/org/pantsbuild/testproject/phrases'
 
   class Bundle(object):
+
     def __init__(self, spec, text):
       self.spec = spec
       self.text = text
@@ -42,7 +43,7 @@ class Bundles(object):
   there_was_a_duck = Bundle('there-was-a-duck',
       "And also, there was a duck.")
 
-  all_bundles = [lesser_of_two, once_upon_a_time, ten_thousand, there_was_a_duck,]
+  all_bundles = [lesser_of_two, once_upon_a_time, ten_thousand, there_was_a_duck]
 
 
 class SpecExcludeIntegrationTest(PantsRunIntegrationTest):
@@ -78,22 +79,17 @@ class SpecExcludeIntegrationTest(PantsRunIntegrationTest):
         rmtree(path)
 
     with self._handle_bundles(names) as (paths, jars):
-      pants_run = self.run_pants(['goal', 'bundle',] + args, config=config)
-      self.assertEquals(pants_run.returncode, self.PANTS_SUCCESS_CODE,
-                        "goal bundle expected success, got {0}\n"
-                        "got stderr:\n{1}\n"
-                        "got stdout:\n{2}\n".format(pants_run.returncode,
-                                                    pants_run.stderr_data,
-                                                    pants_run.stdout_data))
-      for path, jar, expected in zip(paths, jars, outputs):
-        java_run = subprocess.Popen(['java', '-jar', jar],
-                                    stdout=subprocess.PIPE,
-                                    cwd=path)
-        java_retcode = java_run.wait()
-        java_out = java_run.stdout.read()
-        self.assertEquals(java_retcode, 0)
-        self.assertTrue(expected in java_out, "Expected '{output}' from {jar}, not '{stdout}'."
-                                              .format(output=expected, jar=jar, stdout=java_out))
+      with self.pants_results(['bundle'] + args, config=config) as pants_run:
+        self.assert_success(pants_run)
+        for path, jar, expected in zip(paths, jars, outputs):
+          java_run = subprocess.Popen(['java', '-jar', jar],
+                                      stdout=subprocess.PIPE,
+                                      cwd=path)
+          java_retcode = java_run.wait()
+          java_out = java_run.stdout.read()
+          self.assertEquals(java_retcode, 0)
+          self.assertTrue(expected in java_out, "Expected '{output}' from {jar}, not '{stdout}'."
+                                                .format(output=expected, jar=jar, stdout=java_out))
 
     lingering = [path for path in all_paths if os.path.exists(path)]
     self.assertTrue(not lingering, "Left with unexpected bundles! {bundles}"
@@ -102,34 +98,34 @@ class SpecExcludeIntegrationTest(PantsRunIntegrationTest):
   def test_single_run(self):
     """Test whether we can run a single target without special flags."""
     self._test_bundle_existences(
-        [Bundles.lesser_of_two.full_spec,],
-        [Bundles.lesser_of_two,],
+        [Bundles.lesser_of_two.full_spec],
+        [Bundles.lesser_of_two],
     )
 
   def test_double_run(self):
     """Test whether we can run two targets without special flags."""
     self._test_bundle_existences(
-        [Bundles.lesser_of_two.full_spec, Bundles.once_upon_a_time.full_spec,],
-        [Bundles.lesser_of_two, Bundles.once_upon_a_time,],
+        [Bundles.lesser_of_two.full_spec, Bundles.once_upon_a_time.full_spec],
+        [Bundles.lesser_of_two, Bundles.once_upon_a_time],
     )
 
   def test_all_run(self):
     """Test whether we can run everything with ::."""
     self._test_bundle_existences(
-        [Bundles.phrase_path + '::',],
+        [Bundles.phrase_path + '::'],
         Bundles.all_bundles,
     )
 
   def test_exclude_lesser(self):
     self._test_bundle_existences(
-        [Bundles.phrase_path + '::', '--exclude-target-regexp=lesser',],
-        set(Bundles.all_bundles) - set([Bundles.lesser_of_two,]),
+        [Bundles.phrase_path + '::', '--exclude-target-regexp=lesser'],
+        set(Bundles.all_bundles) - set([Bundles.lesser_of_two]),
     )
 
   def test_exclude_thoe(self):
     self._test_bundle_existences(
-        [Bundles.phrase_path + '::', r'--exclude-target-regexp=\bth[oe]',],
-        set(Bundles.all_bundles) - set([Bundles.there_was_a_duck, Bundles.ten_thousand,]),
+        [Bundles.phrase_path + '::', r'--exclude-target-regexp=\bth[oe]', ],
+        set(Bundles.all_bundles) - set([Bundles.there_was_a_duck, Bundles.ten_thousand]),
     )
 
   def test_exclude_two(self):
@@ -138,8 +134,9 @@ class SpecExcludeIntegrationTest(PantsRunIntegrationTest):
           '--exclude-target-regexp=duck',
           '--exclude-target-regexp=time',
         ],
-        set(Bundles.all_bundles) - set([Bundles.there_was_a_duck, Bundles.once_upon_a_time,]),
+        set(Bundles.all_bundles) - set([Bundles.there_was_a_duck, Bundles.once_upon_a_time]),
     )
+
 
 class SpecExcludePantsIniIntegrationTest(PantsRunIntegrationTest):
   """Tests the functionality of the exclude_specs option in pants.ini ."""
@@ -151,38 +148,41 @@ class SpecExcludePantsIniIntegrationTest(PantsRunIntegrationTest):
 
     tempdir = tempfile.mkdtemp()
     tmp_output = os.path.join(tempdir, 'minimize-output1.txt')
-    run_result = self.run_pants(
-      ['goal', 'minimize', 'testprojects::', '--quiet',
-       '--minimize-output-file={0}'.format(tmp_output)])
-    self.assertEquals(0, run_result.returncode,
-                      msg="failed with output: {0}".format(run_result.stdout_data))
+    run_result = self.run_pants(['minimize',
+                                 'testprojects::',
+                                 '--quiet',
+                                 '--minimize-output-file={0}'.format(tmp_output)])
+    self.assert_success(run_result)
     results = output_to_list(tmp_output)
-    self.assertIn('testprojects/src/java/com/pants/testproject/phrases:ten-thousand',
+    self.assertIn('testprojects/src/java/org/pantsbuild/testproject/phrases:ten-thousand',
                   results)
-    self.assertIn('testprojects/src/java/com/pants/testproject/phrases:once-upon-a-time',
+    self.assertIn('testprojects/src/java/org/pantsbuild/testproject/phrases:once-upon-a-time',
                   results)
-    self.assertIn('testprojects/src/java/com/pants/testproject/phrases:lesser-of-two',
+    self.assertIn('testprojects/src/java/org/pantsbuild/testproject/phrases:lesser-of-two',
                   results)
-    self.assertIn('testprojects/src/java/com/pants/testproject/phrases:there-was-a-duck',
+    self.assertIn('testprojects/src/java/org/pantsbuild/testproject/phrases:there-was-a-duck',
                   results)
 
     tmp_output = os.path.join(tempdir, 'minimize-output2.txt')
 
-    run_result = self.run_pants(['goal', 'minimize', 'testprojects::', '--quiet',
+    run_result = self.run_pants(['minimize',
+                                 'testprojects::',
+                                 '--quiet',
                                  '--minimize-output-file={0}'.format(tmp_output)],
                                 config={
-                                  'DEFAULT' : {'spec_excludes' : [
-                                    'testprojects/src/java/com/pants/testproject/phrases'
-                                  ]}
-    })
-    self.assertEquals(0, run_result.returncode,
-                      msg="failed with output: {0}".format(run_result.stdout_data))
+                                    'DEFAULT': {
+                                        'spec_excludes': [
+                                            'testprojects/src/java/org/pantsbuild/testproject/phrases'
+                                        ]
+                                    }
+                                })
+    self.assert_success(run_result)
     results = output_to_list(tmp_output)
-    self.assertNotIn('testprojects/src/java/com/pants/testproject/phrases:ten-thousand',
+    self.assertNotIn('testprojects/src/java/org/pantsbuild/testproject/phrases:ten-thousand',
                      results)
-    self.assertNotIn('testprojects/src/java/com/pants/testproject/phrases:once-upon-a-time',
+    self.assertNotIn('testprojects/src/java/org/pantsbuild/testproject/phrases:once-upon-a-time',
                      results)
-    self.assertNotIn('testprojects/src/java/com/pants/testproject/phrases:lesser-of-two',
+    self.assertNotIn('testprojects/src/java/org/pantsbuild/testproject/phrases:lesser-of-two',
                      results)
-    self.assertNotIn('testprojects/src/java/com/pants/testproject/phrases:there-was-a-duck',
+    self.assertNotIn('testprojects/src/java/org/pantsbuild/testproject/phrases:there-was-a-duck',
                      results)

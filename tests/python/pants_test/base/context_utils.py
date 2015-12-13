@@ -2,96 +2,91 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-import io
+import logging
 import sys
+from contextlib import contextmanager
+
 from twitter.common.collections import maybe_list
-from twitter.common.lang import Compatibility
 
-from pants.base.config import Config, SingleFileConfig
-from pants.base.target import Target
+from pants.base.workunit import WorkUnit
+from pants.build_graph.target import Target
 from pants.goal.context import Context
-from pants.goal.run_tracker import RunTracker
-from pants.reporting.plaintext_reporter import PlainTextReporter
-from pants.reporting.report import Report
-from pants.util.dirutil import safe_mkdtemp
+from pants_test.option.util.fakes import create_options
 
 
-def create_new_options(new_options):
-  """Create a fake new-style options object for testing.
+class TestContext(Context):
+  """A Context to use during unittesting.
 
-  Note that the returned object only provides access to the provided options values. There is
-  no registration mechanism on this object. Code under test shouldn't care  about resolving
-  cmd-line flags vs. config vs. env vars etc. etc.
+  Stubs out various dependencies that we don't want to introduce in unit tests.
 
-  :param dict new_options: An optional dict of scope -> (dict of option name -> value).
+  TODO: Instead of extending the runtime Context class, create a Context interface and have
+  TestContext and a runtime Context implementation extend that. This will also allow us to
+  isolate the parts of the interface that a Task is allowed to use vs. the parts that the
+  task-running machinery is allowed to use.
   """
-  class TestOptions(object):
-    def for_scope(self, scope):
-      class TestOptionValues(object):
-        def __init__(self):
-          self.__dict__ = new_options[scope]
-      return TestOptionValues()
+  class DummyWorkUnit(object):
+    """A workunit stand-in that sends all output to stderr.
 
-    def for_global_scope(self):
-      return self.for_scope('')
+   These outputs are typically only used by subprocesses spawned by code under test, not
+   the code under test itself, and would otherwise go into some reporting black hole.  The
+   testing framework will only display the stderr output when a test fails.
 
-  return TestOptions()
+   Provides no other tracking/labeling/reporting functionality. Does not require "opening"
+   or "closing".
+   """
+
+    def output(self, name):
+      return sys.stderr
+
+    def set_outcome(self, outcome):
+      return sys.stderr.write('\nWorkUnit outcome: {}\n'.format(WorkUnit.outcome_string(outcome)))
+
+  class DummyRunTracker(object):
+    """A runtracker stand-in that does no actual tracking."""
+    class DummyArtifactCacheStats(object):
+      def add_hits(self, cache_name, targets): pass
+
+      def add_misses(self, cache_name, targets, causes): pass
+
+    artifact_cache_stats = DummyArtifactCacheStats()
+
+  @contextmanager
+  def new_workunit(self, name, labels=None, cmd='', log_config=None):
+    sys.stderr.write('\nStarting workunit {}\n'.format(name))
+    yield TestContext.DummyWorkUnit()
+
+  @property
+  def log(self):
+    return logging.getLogger('test')
+
+  def submit_background_work_chain(self, work_chain, parent_workunit_name=None):
+    # Just do the work synchronously, so we don't need a run tracker, background workers and so on.
+    for work in work_chain:
+      for args_tuple in work.args_tuples:
+        work.func(*args_tuple)
+
+  def subproc_map(self, f, items):
+    # Just execute in-process.
+    return map(f, items)
 
 
-def create_config(sample_ini=''):
-  """Creates a ``Config`` from the ``sample_ini`` file contents.
+# TODO: Make Console and Workspace into subsystems, and simplify this signature.
+def create_context(options=None, passthru_args=None, target_roots=None, build_graph=None,
+                   build_file_parser=None, address_mapper=None,
+                   console_outstream=None, workspace=None):
+  """Creates a ``Context`` with no options or targets by default.
 
-  :param string sample_ini: The contents of the ini file containing the config values.
+  :param options: A map of scope -> (map of key to value).
+
+  Other params are as for ``Context``.
   """
-  if not isinstance(sample_ini, Compatibility.string):
-    raise ValueError('The sample_ini supplied must be a string, given: %s' % sample_ini)
-
-  parser = Config.create_parser()
-  with io.BytesIO(sample_ini.encode('utf-8')) as ini:
-    parser.readfp(ini)
-  return SingleFileConfig('dummy/path', parser)
-
-
-def create_run_tracker(info_dir=None):
-  """Creates a ``RunTracker`` and starts it.
-
-  :param string info_dir: An optional director for the run tracker to store state; defaults to a
-    new temp dir that will be be cleaned up on interpreter exit.
-  """
-  # TODO(John Sirois): Rework uses around a context manager for cleanup of the info_dir in a more
-  # disciplined manner
-  info_dir = info_dir or safe_mkdtemp()
-  run_tracker = RunTracker(info_dir)
-  report = Report()
-  settings = PlainTextReporter.Settings(outfile=sys.stdout,
-                                        log_level=Report.INFO,
-                                        color=False,
-                                        indent=True,
-                                        timing=False,
-                                        cache_stats=False)
-  report.add_reporter('test_debug', PlainTextReporter(run_tracker, settings))
-  run_tracker.start(report)
-  return run_tracker
-
-
-def create_context(config='', new_options=None, target_roots=None, **kwargs):
-  """Creates a ``Context`` with no config values, options, or targets by default.
-
-  :param config: Either a ``Context`` object or else a string representing the contents of the
-    pants.ini to parse the config from.
-  :param new_options: An optional dict of scope -> (dict of name -> new-style option values).
-  :param target_roots: An optional list of target roots to seed the context target graph from.
-  :param ``**kwargs``: Any additional keyword arguments to pass through to the Context constructor.
-  """
-  config = config if isinstance(config, Config) else create_config(config)
-  # TODO: Get rid of this temporary hack after we plumb options through everywhere and can get
-  # rid of the config cache.
-  Config.cache(config)
-
-  run_tracker = create_run_tracker()
+  options = create_options(options or {}, passthru_args=passthru_args)
+  run_tracker = TestContext.DummyRunTracker()
   target_roots = maybe_list(target_roots, Target) if target_roots else []
-  return Context(config, create_new_options(new_options or {}),
-                 run_tracker, target_roots, **kwargs)
+  return TestContext(options=options, run_tracker=run_tracker, target_roots=target_roots,
+                     build_graph=build_graph, build_file_parser=build_file_parser,
+                     address_mapper=address_mapper, console_outstream=console_outstream,
+                     workspace=workspace)

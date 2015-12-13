@@ -2,24 +2,22 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
+
+from hashlib import sha1
 
 from pants.backend.jvm.targets.exclude import Exclude
-from pants.backend.jvm.targets.jar_dependency import Artifact, JarDependency
-from pants.backend.jvm.targets.jvm_binary import Bundle
+from pants.backend.jvm.targets.jar_dependency import JarDependency
 from pants.backend.python.python_requirement import PythonRequirement
-from pants.base.payload import Payload, PayloadFieldAlreadyDefinedError, PayloadFrozenError
-from pants.base.payload_field import (BundleField,
-                                      ExcludesField,
-                                      JarsField,
-                                      PrimitiveField,
-                                      PythonRequirementsField,
+from pants.base.payload_field import (ExcludesField, FingerprintedField, FingerprintedMixin,
+                                      JarsField, PrimitiveField, PythonRequirementsField,
                                       SourcesField)
 from pants_test.base_test import BaseTest
 
 
 class PayloadTest(BaseTest):
+
   def test_excludes_field(self):
     empty = ExcludesField()
     empty_fp = empty.fingerprint()
@@ -38,107 +36,6 @@ class PayloadTest(BaseTest):
     self.assertNotEqual(
       JarsField([jar1, jar2]).fingerprint(),
       JarsField([jar2, jar1]).fingerprint(),
-    )
-
-  def test_jars_field_artifacts(self):
-    jar1 = JarDependency('com', 'foo', '1.0.0').with_artifact('com', 'baz')
-    jar2 = JarDependency('com', 'foo', '1.0.0')
-
-    self.assertNotEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar2]).fingerprint(),
-    )
-
-  def test_jars_field_artifacts(self):
-    jar1 = (JarDependency('com', 'foo', '1.0.0')
-              .with_artifact('com', 'baz')
-              .with_artifact('org', 'bat'))
-    jar2 = (JarDependency('com', 'foo', '1.0.0')
-              .with_artifact('org', 'bat')
-              .with_artifact('com', 'baz'))
-    jar3 = (JarDependency('com', 'foo', '1.0.0')
-              .with_artifact('org', 'bat'))
-
-    jar4 = JarDependency('com', 'foo', '1.0.0')
-
-    self.assertEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar2]).fingerprint(),
-    )
-    self.assertNotEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar3]).fingerprint(),
-    )
-    self.assertNotEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar4]).fingerprint(),
-    )
-    self.assertNotEqual(
-      JarsField([jar3]).fingerprint(),
-      JarsField([jar4]).fingerprint(),
-    )
-
-  def test_jars_field_artifacts_ordering(self):
-    """JarDependencies throw away ordering information about their artifacts in the cache key.
-
-    But they do not throw it away in their internal representation!  In the future, this should be
-    fixed: either they should sort them as they are added and keep a canonical representation, or
-    the order information should be preserved.
-    """
-
-    jar1 = (JarDependency('com', 'foo', '1.0.0')
-              .with_artifact('com', 'baz')
-              .with_artifact('org', 'bat'))
-    jar2 = (JarDependency('com', 'foo', '1.0.0')
-              .with_artifact('org', 'bat')
-              .with_artifact('com', 'baz'))
-
-    self.assertEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar2]).fingerprint(),
-    )
-
-  def test_jars_field_configuration_order(self):
-    """Like artifacts, JarDependencies throw away order information about their configurations.
-
-    But only in the hash key, the internal representation is in the order inserted.
-    """
-    jar1 = (JarDependency('com', 'foo', '1.0.0')
-              .with_docs()
-              .with_sources())
-    jar2 = (JarDependency('com', 'foo', '1.0.0')
-              .with_sources()
-              .with_docs())
-
-    self.assertEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar2]).fingerprint(),
-    )
-
-  def test_jars_field_configuration(self):
-    jar1 = (JarDependency('com', 'foo', '1.0.0')
-              .with_sources())
-    jar2 = (JarDependency('com', 'foo', '1.0.0')
-              .with_docs())
-
-    self.assertNotEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar2]).fingerprint(),
-    )
-
-  def test_jars_field_artifact_configuration(self):
-    """Like artifacts, JarDependencies throw away order information about their configurations.
-
-    But only in the hash key, the internal representation is in the order inserted.
-    """
-    jar1 = (JarDependency('com', 'foo', '1.0.0')
-              .with_sources())
-    jar2 = (JarDependency('com', 'foo', '1.0.0')
-              .with_docs())
-
-    self.assertNotEqual(
-      JarsField([jar1]).fingerprint(),
-      JarsField([jar2]).fingerprint(),
     )
 
   def test_jars_field_apidocs(self):
@@ -274,3 +171,33 @@ class PayloadTest(BaseTest):
           ).fingerprint()
 
     self.assertNotEqual(fp1, fp2)
+
+  def test_fingerprinted_field(self):
+    class TestValue(FingerprintedMixin):
+
+      def __init__(self, test_value):
+        self.test_value = test_value
+
+      def fingerprint(self):
+        hasher = sha1()
+        hasher.update(self.test_value)
+        return hasher.hexdigest()
+
+    field1 = TestValue('field1')
+    field1_same = TestValue('field1')
+    field2 = TestValue('field2')
+    self.assertEquals(field1.fingerprint(), field1_same.fingerprint())
+    self.assertNotEquals(field1.fingerprint(), field2.fingerprint())
+
+    fingerprinted_field1 = FingerprintedField(field1)
+    fingerprinted_field1_same = FingerprintedField(field1_same)
+    fingerprinted_field2 = FingerprintedField(field2)
+    self.assertEquals(fingerprinted_field1.fingerprint(), fingerprinted_field1_same.fingerprint())
+    self.assertNotEquals(fingerprinted_field1.fingerprint(), fingerprinted_field2.fingerprint())
+
+  def test_unimplemented_fingerprinted_field(self):
+    class TestUnimplementedValue(FingerprintedMixin):
+      pass
+
+    with self.assertRaises(NotImplementedError):
+      FingerprintedField(TestUnimplementedValue()).fingerprint()

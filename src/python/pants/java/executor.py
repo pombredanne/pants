@@ -2,22 +2,25 @@
 # Copyright 2014 Pants project contributors (see CONTRIBUTORS.md).
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
-from __future__ import (nested_scopes, generators, division, absolute_import, with_statement,
-                        print_function, unicode_literals)
+from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
+                        unicode_literals, with_statement)
 
-from abc import abstractmethod, abstractproperty
-from contextlib import contextmanager
+import logging
 import os
 import subprocess
+from abc import abstractmethod, abstractproperty
+from contextlib import contextmanager
 
-from twitter.common import log
+from six import string_types
 from twitter.common.collections import maybe_list
-from twitter.common.lang import AbstractClass, Compatibility
 
 from pants.base.build_environment import get_buildroot
-from pants.java.distribution.distribution import Distribution
 from pants.util.contextutil import environment_as
 from pants.util.dirutil import relativize_paths
+from pants.util.meta import AbstractClass
+
+
+logger = logging.getLogger(__name__)
 
 
 class Executor(AbstractClass):
@@ -26,14 +29,17 @@ class Executor(AbstractClass):
   @staticmethod
   def _scrub_args(classpath, main, jvm_options, args, cwd):
     classpath = maybe_list(classpath)
-    if not isinstance(main, Compatibility.string) or not main:
-      raise ValueError('A non-empty main classname is required, given: %s' % main)
+    if not isinstance(main, string_types) or not main:
+      raise ValueError('A non-empty main classname is required, given: {}'.format(main))
     jvm_options = maybe_list(jvm_options or ())
     args = maybe_list(args or ())
     return classpath, main, jvm_options, args, cwd
 
   class Error(Exception):
     """Indicates an error launching a java program."""
+
+  class InvalidDistribution(ValueError):
+    """Indicates an invalid Distribution was used to construct this runner."""
 
   class Runner(object):
     """A re-usable executor that can run a configured java command line."""
@@ -42,9 +48,14 @@ class Executor(AbstractClass):
     def executor(self):
       """Returns the executor this runner uses to run itself."""
 
-    @abstractproperty
+    @property
     def cmd(self):
       """Returns a string representation of the command that will be run."""
+      return ' '.join(self.command)
+
+    @abstractproperty
+    def command(self):
+      """Returns a copy of the command line that will be run as a list of command line tokens."""
 
     @abstractmethod
     def run(self, stdout=None, stderr=None, cwd=None):
@@ -58,20 +69,26 @@ class Executor(AbstractClass):
       :param string cwd: optionally set the working directory
       """
 
-  def __init__(self, distribution=None):
+    @abstractmethod
+    def kill(self):
+      """Terminates the java command."""
+      raise NotImplementedError
+
+  def __init__(self, distribution):
     """Constructs an Executor that can be used to launch java programs.
 
-    :param distribution: an optional validated java distribution to use when launching java
-      programs
+    :param distribution: a validated java distribution to use when launching java programs.
     """
-    if distribution:
-      if not isinstance(distribution, Distribution):
-        raise ValueError('A valid distribution is required, given: %s' % distribution)
-      distribution.validate()
-    else:
-      distribution = Distribution.cached()
-
+    if not hasattr(distribution, 'java') or not hasattr(distribution, 'validate'):
+      raise self.InvalidDistribution('A valid distribution is required, given: {}'
+                                     .format(distribution))
+    distribution.validate()
     self._distribution = distribution
+
+  @property
+  def distribution(self):
+    """Returns the `Distribution` this executor runs via."""
+    return self._distribution
 
   def runner(self, classpath, main, jvm_options=None, args=None, cwd=None):
     """Returns an `Executor.Runner` for the given java command."""
@@ -110,28 +127,34 @@ class Executor(AbstractClass):
 
 class CommandLineGrabber(Executor):
   """Doesn't actually execute anything, just captures the cmd line."""
-  def __init__(self, distribution=None):
+
+  def __init__(self, distribution):
     super(CommandLineGrabber, self).__init__(distribution=distribution)
     self._command = None  # Initialized when we run something.
 
   def _runner(self, classpath, main, jvm_options, args, cwd=None):
     self._command = self._create_command(classpath, main, jvm_options, args, cwd=cwd)
+
     class Runner(self.Runner):
       @property
       def executor(_):
         return self
 
       @property
-      def cmd(_):
-        return ' '.join(self._command)
+      def command(_):
+        return list(self._command)
 
       def run(_, stdout=None, stderr=None, cwd=None):
         return 0
+
     return Runner()
 
   @property
   def cmd(self):
     return self._command
+
+  def kill(self):
+    pass
 
 
 class SubprocessExecutor(Executor):
@@ -156,13 +179,14 @@ class SubprocessExecutor(Executor):
     for env_var in cls._SCRUBBED_ENV:
       value = os.getenv(env_var)
       if value:
-        log.warn('Scrubbing {env_var}={value}'.format(env_var=env_var, value=value))
+        logger.warn('Scrubbing {env_var}={value}'.format(env_var=env_var, value=value))
     with environment_as(**cls._SCRUBBED_ENV):
       yield
 
-  def __init__(self, distribution=None):
+  def __init__(self, distribution):
     super(SubprocessExecutor, self).__init__(distribution=distribution)
     self._buildroot = get_buildroot()
+    self._process = None
 
   def _create_command(self, classpath, main, jvm_options, args, cwd=None):
     cwd = cwd or self._buildroot
@@ -178,8 +202,8 @@ class SubprocessExecutor(Executor):
         return self
 
       @property
-      def cmd(_):
-        return ' '.join(command)
+      def command(_):
+        return list(command)
 
       def run(_, stdout=None, stderr=None, cwd=None):
         return self._spawn(command, stdout=stdout, stderr=stderr, cwd=cwd).wait()
@@ -194,12 +218,17 @@ class SubprocessExecutor(Executor):
     cmd = self._create_command(*self._scrub_args(classpath, main, jvm_options, args, cwd=cwd))
     return self._spawn(cmd, cwd, **subprocess_args)
 
+  def kill(self):
+    if self._process is not None:
+      self._process.kill()
+
   def _spawn(self, cmd, cwd=None, **subprocess_args):
     with self._maybe_scrubbed_env():
       cwd = cwd or self._buildroot
-      log.debug('Executing: {cmd} args={args} at cwd={cwd}'
-               .format(cmd=' '.join(cmd), args=subprocess_args, cwd=cwd))
+      logger.debug('Executing: {cmd} args={args} at cwd={cwd}'
+                   .format(cmd=' '.join(cmd), args=subprocess_args, cwd=cwd))
       try:
-        return subprocess.Popen(cmd, cwd=cwd, **subprocess_args)
+        self._process = subprocess.Popen(cmd, cwd=cwd, **subprocess_args)
+        return self._process
       except OSError as e:
         raise self.Error('Problem executing {0}: {1}'.format(self._distribution.java, e))
