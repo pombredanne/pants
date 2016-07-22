@@ -19,6 +19,8 @@ class ScalaLibrary(ExportableJvmLibrary):
   goal on this target creates a ``.jar``; but that's an unusual thing to do.
   Instead, a ``jvm_binary`` might depend on this library; that binary is a
   more sensible thing to bundle.
+
+  :API: public
   """
 
   @classmethod
@@ -45,11 +47,7 @@ class ScalaLibrary(ExportableJvmLibrary):
   def traversable_dependency_specs(self):
     for spec in super(ScalaLibrary, self).traversable_dependency_specs:
       yield spec
-
-    # TODO(John Sirois): Targets should be able to set their scala platform version
-    # explicitly, and not have to conform to this global setting.
-    for library_spec in ScalaPlatform.global_instance().runtime:
-      yield library_spec
+    yield ScalaPlatform.runtime_library_target_spec(self._build_graph)
 
   @property
   def traversable_specs(self):

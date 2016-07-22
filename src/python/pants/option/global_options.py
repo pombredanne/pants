@@ -8,10 +8,9 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 import logging
 import os
 
-from pants.base.build_environment import (get_buildroot, get_pants_cachedir, get_pants_configdir,
-                                          pants_version)
+from pants.base.build_environment import (get_buildroot, get_default_pants_config_file,
+                                          get_pants_cachedir, get_pants_configdir, pants_version)
 from pants.option.arg_splitter import GLOBAL_SCOPE
-from pants.option.custom_types import list_option
 from pants.option.optionable import Optionable
 from pants.option.scope import ScopeInfo
 
@@ -42,13 +41,12 @@ class GlobalOptionsRegistrar(Optionable):
     logging.addLevelName(logging.WARNING, 'WARN')
     register('-l', '--level', choices=['debug', 'info', 'warn'], default='info', recursive=True,
              help='Set the logging level.')
-    register('-q', '--quiet', action='store_true', recursive=True,
+    register('-q', '--quiet', type=bool, recursive=True,
              help='Squelches most console output.')
     # Not really needed in bootstrap options, but putting it here means it displays right
     # after -l and -q in help output, which is conveniently contextual.
-    register('--colors', '--color', action='store_true', default=True, recursive=True,
-             help='Set whether log messages are displayed in color. NB: The singular `color` form '
-                  'is deprecated until 0.0.66: prefer `colors`.')
+    register('--colors', type=bool, default=True, recursive=True,
+             help='Set whether log messages are displayed in color.')
 
     # Pants code uses this only to verify that we are of the requested version. However
     # setup scripts, runner scripts, IDE plugins, etc., may grep this out of pants.ini
@@ -57,13 +55,33 @@ class GlobalOptionsRegistrar(Optionable):
     register('--pants-version', advanced=True, default=pants_version(),
              help='Use this pants version.')
 
-    register('--plugins', advanced=True, type=list_option, help='Load these plugins.')
+    register('--plugins', advanced=True, type=list, help='Load these plugins.')
     register('--plugin-cache-dir', advanced=True,
              default=os.path.join(get_pants_cachedir(), 'plugins'),
              help='Cache resolved plugin requirements here.')
 
-    register('--backend-packages', advanced=True, type=list_option,
-             help='Load backends from these packages that are already on the path.')
+    register('--backend-packages', advanced=True, type=list,
+             default=['pants.backend.graph_info',
+                      'pants.backend.python',
+                      'pants.backend.jvm',
+                      'pants.backend.codegen',
+                      'pants.backend.project_info'],
+             help='Load backends from these packages that are already on the path. '
+                  'Add contrib and custom backends to this list.')
+    register('--default-backend-packages', advanced=True, type=list,
+             removal_version='1.3.0',
+             removal_hint='All backends must be specified using the backend_packages option. '
+                          'That option has the same defaults as this one, and you can append'
+                          'and filter those using +[...] and -[...] syntax, as described here: '
+                          'http://www.pantsbuild.org/options.html#list-options.',
+             default=['pants.backend.graph_info',
+                      'pants.backend.python',
+                      'pants.backend.jvm',
+                      'pants.backend.codegen',
+                      'pants.backend.project_info'],
+             help='Load these backends by default.  These backends come distributed with Pants. '
+                  'Remove unused backends from this list to speed up execution. '
+                  'Use --backend-packages to configure additional backends with Pants.')
 
     register('--pants-bootstrapdir', advanced=True, metavar='<dir>', default=get_pants_cachedir(),
              help='Use this dir for global cache.')
@@ -78,18 +96,31 @@ class GlobalOptionsRegistrar(Optionable):
     register('--pants-distdir', advanced=True, metavar='<dir>',
              default=os.path.join(buildroot, 'dist'),
              help='Write end-product artifacts to this dir.')
-    register('--config-override', advanced=True, action='append', metavar='<path>',
+    register('--pants-subprocessdir', advanced=True, default=os.path.join(buildroot, '.pids'),
+             help='The directory to use for tracking subprocess metadata, if any. This should '
+                  'live outside of the dir used by `--pants-workdir` to allow for tracking '
+                  'subprocesses that outlive the workdir data (e.g. `./pants server`).')
+    register('--pants-config-files', advanced=True, type=list,
+             default=[get_default_pants_config_file()], help='Paths to Pants config files.')
+    # TODO: Deprecate --config-override in favor of --pants-config-files.
+    # But only once we're able to both append and override list-valued options, as there are
+    # use-cases for both here.
+    # TODO: Deprecate the --pantsrc/--pantsrc-files options?  This would require being able
+    # to set extra config file locations in an initial bootstrap config file.
+    register('--config-override', advanced=True, type=list, metavar='<path>',
              help='A second config file, to override pants.ini.')
-    register('--pantsrc', advanced=True, action='store_true', default=True,
+    register('--pantsrc', advanced=True, type=bool, default=True,
              help='Use pantsrc files.')
-    register('--pantsrc-files', advanced=True, action='append', metavar='<path>',
+    register('--pantsrc-files', advanced=True, type=list, metavar='<path>',
              default=['/etc/pantsrc', '~/.pants.rc'],
              help='Override config with values from these files. '
                   'Later files override earlier ones.')
-    register('--pythonpath', advanced=True, action='append',
+    register('--pythonpath', advanced=True, type=list,
              help='Add these directories to PYTHONPATH to search for plugins.')
-    register('--target-spec-file', action='append', dest='target_spec_files',
+    register('--target-spec-file', type=list, dest='target_spec_files',
              help='Read additional specs from this file, one per line')
+    register('--verify-config', type=bool, default=True,
+             help='Verify that all config file values correspond to known options.')
 
     # These logging options are registered in the bootstrap phase so that plugins can log during
     # registration and not so that their values can be interpolated in configs.
@@ -99,8 +130,12 @@ class GlobalOptionsRegistrar(Optionable):
     # This facilitates bootstrap-time configuration of pantsd usage such that we can
     # determine whether or not to use the Pailgun client to invoke a given pants run
     # without resorting to heavier options parsing.
-    register('--enable-pantsd', advanced=True, action='store_true', default=False,
-             help='Enables use of the pants daemon. (Beta)')
+    register('--enable-pantsd', advanced=True, type=bool, default=False,
+             help='Enables use of the pants daemon (and implicitly, the v2 engine). (Beta)')
+
+    # This facilitates use of the v2 engine for BuildGraph construction, sans daemon.
+    register('--enable-v2-engine', advanced=True, type=bool, default=False,
+             help='Enables use of the v2 engine. (Beta)')
 
   @classmethod
   def register_options(cls, register):
@@ -110,11 +145,11 @@ class GlobalOptionsRegistrar(Optionable):
     # global-scope options, for convenience.
     cls.register_bootstrap_options(register)
 
-    register('-x', '--time', action='store_true',
+    register('-x', '--time', type=bool,
              help='Output a timing report at the end of the run.')
-    register('-e', '--explain', action='store_true',
+    register('-e', '--explain', type=bool,
              help='Explain the execution of goals.')
-    register('--tag', action='append', metavar='[+-]tag1,tag2,...',
+    register('--tag', type=list, metavar='[+-]tag1,tag2,...',
              help="Include only targets with these tags (optional '+' prefix) or without these "
                   "tags ('-' prefix).  Useful with ::, to find subsets of targets "
                   "(e.g., integration tests.)")
@@ -122,35 +157,47 @@ class GlobalOptionsRegistrar(Optionable):
     register('-t', '--timeout', advanced=True, type=int, metavar='<seconds>',
              help='Number of seconds to wait for http connections.')
     # TODO: After moving to the new options system these abstraction leaks can go away.
-    register('-k', '--kill-nailguns', advanced=True, action='store_true',
+    register('-k', '--kill-nailguns', advanced=True, type=bool,
              help='Kill nailguns before exiting')
-    register('-i', '--interpreter', advanced=True, default=[], action='append',
+    register('-i', '--interpreter', advanced=True, default=[], type=list,
              metavar='<requirement>',
              help="Constrain what Python interpreters to use.  Uses Requirement format from "
                   "pkg_resources, e.g. 'CPython>=2.6,<3' or 'PyPy'. By default, no constraints "
                   "are used.  Multiple constraints may be added.  They will be ORed together.")
-    register('--exclude-target-regexp', advanced=True, action='append', default=[],
+    register('--exclude-target-regexp', advanced=True, type=list, default=[],
              metavar='<regexp>',
-             help='Exclude targets that match these regexes. Useful with ::, to ignore broken '
-                  'BUILD files.',
+             help='Exclude targets that match these regexes.',
              recursive=True)  # TODO: Does this need to be recursive? What does that even mean?
-    register('--spec-excludes', advanced=True, action='append',
-             default=[register.bootstrap.pants_workdir],
-             help='Ignore these paths when evaluating the command-line target specs.  Useful with '
-                  '::, to avoid descending into unneeded directories.')
-    register('--fail-fast', advanced=True, action='store_true', recursive=True,
+    # Relative pants_distdir to buildroot. Requires --pants-distdir to be bootstrapped above first.
+    # e.g. '/dist/'
+    rel_distdir = '/{}/'.format(os.path.relpath(register.bootstrap.pants_distdir, get_buildroot()))
+    register('--ignore-patterns', advanced=True, type=list, fromfile=True,
+             default=['.*', rel_distdir, 'bower_components', 'node_modules', '*.egg-info'],
+             help='Glob patterns for ignoring files when reading BUILD files. '
+                  'Use to ignore unneeded directories or BUILD files. '
+                  'Entries use the gitignore pattern syntax (https://git-scm.com/docs/gitignore).')
+    # TODO: Clarify in the help msgs the difference between --ignore-patterns and --pants-ignore.
+    # See https://github.com/pantsbuild/pants/issues/3671.
+    register('--pants-ignore', advanced=True, type=list, fromfile=True, default=['.*', rel_distdir],
+             help='Ignore files that match the specified patterns. '
+                  'Entries use the gitignore pattern syntax (https://git-scm.com/docs/gitignore). '
+                  'This option is currently experimental.')
+    register('--fail-fast', advanced=True, type=bool, recursive=True,
              help='Exit as quickly as possible on error, rather than attempting to continue '
                   'to process the non-erroneous subset of the input.')
     register('--cache-key-gen-version', advanced=True, default='200', recursive=True,
              help='The cache key generation. Bump this to invalidate every artifact for a scope.')
+    register('--workdir-max-build-entries', advanced=True, type=int, default=None,
+             help='Maximum number of previous builds to keep per task target pair in workdir. '
+             'If set, minimum 2 will always be kept to support incremental compilation.')
     register('--max-subprocess-args', advanced=True, type=int, default=100, recursive=True,
              help='Used to limit the number of arguments passed to some subprocesses by breaking '
-             'the command up into multiple invocations')
-    register('--print-exception-stacktrace', advanced=True, action='store_true',
+             'the command up into multiple invocations.')
+    register('--print-exception-stacktrace', advanced=True, type=bool,
              help='Print to console the full exception stack trace if encountered.')
     register('--build-file-rev', advanced=True,
              help='Read BUILD files from this scm rev instead of from the working tree.  This is '
              'useful for implementing pants-aware sparse checkouts.')
-    register('--lock', advanced=True, action='store_true', default=True,
+    register('--lock', advanced=True, type=bool, default=True,
              help='Use a global lock to exclude other versions of pants from running during '
                   'critical operations.')

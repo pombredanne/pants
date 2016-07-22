@@ -12,9 +12,9 @@ from twitter.common.collections.orderedset import OrderedSet
 
 from pants.backend.jvm.subsystems.shader import Shader
 from pants.backend.jvm.targets.jvm_binary import JvmBinary
-from pants.backend.jvm.tasks.classpath_util import ClasspathUtil
 from pants.backend.jvm.tasks.jar_task import JarBuilderTask
 from pants.base.exceptions import TaskError
+from pants.build_graph.target_scopes import Scopes
 from pants.java.util import execute_runner
 from pants.util.contextutil import temporary_dir
 from pants.util.fileutil import atomic_copy
@@ -22,6 +22,10 @@ from pants.util.memo import memoized_property
 
 
 class JvmBinaryTask(JarBuilderTask):
+  """Encapsulates operations to build or update JvmBinary jars.
+
+  :API: public
+  """
 
   @staticmethod
   def is_binary(target):
@@ -47,36 +51,36 @@ class JvmBinaryTask(JarBuilderTask):
   def subsystem_dependencies(cls):
     return super(JvmBinaryTask, cls).subsystem_dependencies() + (Shader.Factory,)
 
-  def list_external_jar_dependencies(self, binary, confs=None):
+  def list_external_jar_dependencies(self, binary):
     """Returns the external jar dependencies of the given binary.
 
     :param binary: The jvm binary target to list transitive external dependencies for.
     :type binary: :class:`pants.backend.jvm.targets.jvm_binary.JvmBinary`
-    :param confs: The ivy configurations to include in the dependencies list, ('default',) by
-                  default.
-    :type confs: :class:`collections.Iterable` of string
     :returns: A list of (jar path, coordinate) tuples.
     :rtype: list of (string, :class:`pants.backend.jvm.jar_dependency_utils.M2Coordinate`)
     """
     classpath_products = self.context.products.get_data('runtime_classpath')
     classpath_entries = classpath_products.get_artifact_classpath_entries_for_targets(
-        binary.closure(bfs=True))
-    confs = confs or ('default',)
-    external_jars = OrderedSet(jar_entry for conf, jar_entry in classpath_entries if conf in confs)
+        binary.closure(bfs=True, include_scopes=Scopes.JVM_RUNTIME_SCOPES,
+                       respect_intransitive=True))
+    external_jars = OrderedSet(jar_entry for conf, jar_entry in classpath_entries
+                               if conf == 'default')
     return [(entry.path, entry.coordinate) for entry in external_jars
             if not entry.is_excluded_by(binary.deploy_excludes)]
 
   @contextmanager
-  def monolithic_jar(self, binary, path, canonical_classpath_base_dir=None):
-    """Creates a jar containing the class files for a jvm_binary target and all its deps.
+  def monolithic_jar(self, binary, path, manifest_classpath=None):
+    """Creates a jar containing all the dependencies for a jvm_binary target.
 
     Yields a handle to the open jarfile, so the caller can add to the jar if needed.
+    The yielded jar file either has all the class files for the jvm_binary target as
+    a fat jar, or includes those dependencies in the `Class-Path` field of its
+    Manifest.
 
     :param binary: The jvm_binary target to operate on.
     :param path: Write the output jar here, overwriting an existing file, if any.
-    :param string canonical_classpath_base_dir: If set, instead of directly adding targets
-      to the jar bundle, create canonical symlinks to the targets' classpath from this base_dir
-      and save to jar's Manifest attribute Class-Path. Note this includes external dependencies.
+    :param string manifest_classpath: If set output jar will set as its manifest's
+      classpath, otherwise output jar will simply include class files.
     """
     # TODO(benjy): There's actually nothing here that requires 'binary' to be a jvm_binary.
     # It could be any target. And that might actually be useful.
@@ -85,15 +89,16 @@ class JvmBinaryTask(JarBuilderTask):
                          jar_rules=binary.deploy_jar_rules,
                          overwrite=True,
                          compressed=True) as monolithic_jar:
-        with self.context.new_workunit(name='add-internal-classes'):
-          with self.create_jar_builder(monolithic_jar) as jar_builder:
-            jar_builder.add_target(binary, recursive=True,
-                                   canonical_classpath_base_dir=canonical_classpath_base_dir)
+        if manifest_classpath:
+          monolithic_jar.append_classpath(manifest_classpath)
+        else:
+          with self.context.new_workunit(name='add-internal-classes'):
+            with self.create_jar_builder(monolithic_jar) as jar_builder:
+              jar_builder.add_target(binary, recursive=True)
 
-        # NB(gmalmquist): Shading each jar dependency with its own prefix would be a nice feature,
-        # but is not currently possible with how things are set up. It may not be possible to do
-        # in general, at least efficiently.
-        if not canonical_classpath_base_dir:
+          # NB(gmalmquist): Shading each jar dependency with its own prefix would be a nice feature,
+          # but is not currently possible with how things are set up. It may not be possible to do
+          # in general, at least efficiently.
           with self.context.new_workunit(name='add-dependency-jars'):
             dependencies = self.list_external_jar_dependencies(binary)
             for jar, coordinate in dependencies:
@@ -121,8 +126,7 @@ class JvmBinaryTask(JarBuilderTask):
     self.context.log.debug('Shading {}.'.format(jar_path))
     with temporary_dir() as tempdir:
       output_jar = os.path.join(tempdir, os.path.basename(jar_path))
-      rules = [rule.rule() for rule in shading_rules]
-      with self.shader.binary_shader_for_rules(output_jar, jar_path, rules) as shade_runner:
+      with self.shader.binary_shader_for_rules(output_jar, jar_path, shading_rules) as shade_runner:
         result = execute_runner(shade_runner, workunit_factory=self.context.new_workunit,
                                 workunit_name='jarjar')
         if result != 0:

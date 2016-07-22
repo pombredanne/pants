@@ -2,6 +2,15 @@
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 python_library(
+  name='argfile',
+  sources=['argfile.py'],
+  dependencies=[
+    'src/python/pants/util:contextutil',
+    'src/python/pants/util:dirutil',
+  ]
+)
+
+python_library(
   name='artifact',
   sources=['artifact.py'],
   dependencies=[
@@ -27,6 +36,7 @@ python_library(
     ':ossrh_publication_metadata',
     ':repository',
     ':scala_artifact',
+    'src/python/pants/backend/jvm/subsystems:jar_dependency_management',
     'src/python/pants/backend/jvm/subsystems:shader',
     'src/python/pants/backend/jvm/targets:all',
     'src/python/pants/backend/jvm/tasks:all',
@@ -46,12 +56,17 @@ python_library(
     '3rdparty/python/twitter/commons:twitter.common.collections',
     '3rdparty/python:six',
     ':jar_dependency_utils',
+    'src/python/pants/backend/jvm/subsystems:jar_dependency_management',
     'src/python/pants/backend/jvm/targets:jvm',
     'src/python/pants/base:build_environment',
+    'src/python/pants/base:deprecated',
     'src/python/pants/base:generator',
     'src/python/pants/base:revision',
     'src/python/pants/build_graph',
+    'src/python/pants/ivy',
+    'src/python/pants/java:util',
     'src/python/pants/util:dirutil',
+    'src/python/pants/util:fileutil',
   ],
 )
 

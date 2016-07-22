@@ -7,9 +7,11 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 
 import os.path
 
+from pants.base.exceptions import TargetDefinitionException
 from pants.base.payload import Payload
-from pants.base.payload_field import DeferredSourcesField
+from pants.build_graph.address import Address, Addresses
 from pants.build_graph.target import Target
+from pants.source.payload_fields import DeferredSourcesField
 from pants_test.base_test import BaseTest
 from pants_test.subsystem.subsystem_util import subsystem_instance
 
@@ -37,6 +39,20 @@ class TargetTest(BaseTest):
     self.assertEquals(list(syn_two.derived_from_chain), [syn_one, concrete])
     self.assertEquals(list(syn_one.derived_from_chain), [concrete])
     self.assertEquals(list(concrete.derived_from_chain), [])
+
+  def test_is_synthetic(self):
+    # add concrete target
+    concrete = self.make_target('y:concrete', Target)
+
+    # add synthetic targets
+    syn_one = self.make_target('y:syn_one', Target, derived_from=concrete)
+    syn_two = self.make_target('y:syn_two', Target, derived_from=syn_one)
+    syn_three = self.make_target('y:syn_three', Target, synthetic=True)
+
+    self.assertFalse(concrete.is_synthetic)
+    self.assertTrue(syn_one.is_synthetic)
+    self.assertTrue(syn_two.is_synthetic)
+    self.assertTrue(syn_three.is_synthetic)
 
   def test_empty_traversable_properties(self):
     target = self.make_target(':foo', Target)
@@ -84,3 +100,49 @@ class TargetTest(BaseTest):
     short_id = short_target.id
     self.assertEqual(short_id,
                      'dummy.dummy1.dummy2.dummy3.dummy4.dummy5.dummy6.dummy7.dummy8.dummy9.foo')
+
+  def test_create_sources_field_with_string_fails(self):
+    target = self.make_target(':a-target', Target)
+
+    # No key_arg.
+    with self.assertRaises(TargetDefinitionException) as cm:
+      target.create_sources_field(sources='a-string', sources_rel_path='')
+    self.assertIn("Expected a glob, an address or a list, but was <type \'unicode\'>",
+                  str(cm.exception))
+
+    # With key_arg.
+    with self.assertRaises(TargetDefinitionException) as cm:
+      target.create_sources_field(sources='a-string', sources_rel_path='', key_arg='my_cool_field')
+    self.assertIn("Expected 'my_cool_field' to be a glob, an address or a list, but was <type \'unicode\'>",
+                  str(cm.exception))
+    #could also test address case, but looks like nothing really uses it.
+
+  def test_sources_with_more_than_one_address_fails(self):
+    addresses = Addresses(['a', 'b', 'c'], '')
+    t = self.make_target(':t', Target)
+
+    # With address, no key_arg.
+    with self.assertRaises(Target.WrongNumberOfAddresses) as cm:
+      t.create_sources_field(sources=addresses, sources_rel_path='', address=Address.parse('a:b'))
+    self.assertIn("Expected a single address to from_target() as argument to 'a:b'",
+                  str(cm.exception))
+
+    # With no address.
+    with self.assertRaises(Target.WrongNumberOfAddresses) as cm:
+      t.create_sources_field(sources=addresses, sources_rel_path='')
+    self.assertIn("Expected a single address to from_target() as argument",
+                  str(cm.exception))
+
+    # With key_arg.
+    with self.assertRaises(Target.WrongNumberOfAddresses) as cm:
+      t.create_sources_field(sources=addresses, sources_rel_path='', key_arg='cool_field')
+    self.assertIn("Expected 'cool_field' to be a single address to from_target() as argument",
+                  str(cm.exception))
+
+  def test_max_recursion(self):
+    target_a = self.make_target('a', Target)
+    target_b = self.make_target('b', Target, dependencies=[target_a])
+    self.make_target('c', Target, dependencies=[target_b])
+    target_a.inject_dependency(Address.parse('c'))
+    with self.assertRaises(Target.RecursiveDepthError):
+      target_a.transitive_invalidation_hash()

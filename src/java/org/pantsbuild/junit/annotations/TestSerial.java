@@ -11,8 +11,12 @@ import java.lang.annotation.Target;
 
 /**
  * Annotate that a test class must be run in serial. See usage note in
- * {@link org.pantsbuild.tools.junit.impl.ConsoleRunnerImpl}. This annotation takes precedence
+ * {@code org.pantsbuild.tools.junit.impl.ConsoleRunnerImpl}. This annotation takes precedence
  * over a {@link TestParallel} annotation if a class has both (including via inheritance).
+ * <P>
+ * Note that this annotation is not currently compatible with the PARALLEL_METHODS or
+ * PARALLEL_CLASSES_AND_METHODS default concurrency setting. See
+ * <a href="https://github.com/pantsbuild/pants/issues/3209">issue 3209</a>
  */
 @Retention(RetentionPolicy.RUNTIME)
 @Inherited

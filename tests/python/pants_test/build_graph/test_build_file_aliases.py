@@ -10,7 +10,7 @@ import unittest
 
 from pants.build_graph.address import Address
 from pants.build_graph.build_file_aliases import BuildFileAliases, TargetMacro
-from pants.build_graph.build_graph import BuildGraph
+from pants.build_graph.mutable_build_graph import MutableBuildGraph
 from pants.build_graph.target import Target
 
 
@@ -77,24 +77,11 @@ class BuildFileAliasesTest(unittest.TestCase):
                                       objects=objects,
                                       context_aware_object_factories=factories))
 
-  def test_curry_context(self):
-    def curry_me(ctx, bob):
-      """original doc"""
-      return ctx, bob
-
-    curried = BuildFileAliases.curry_context(curry_me)
-    func = curried(42)
-
-    self.assertEqual('original doc', curried.__doc__)
-    self.assertTrue('curry_me' in curried.__name__,
-                    'Unhelpful __name__: ' + curried.__name__)
-    self.assertEqual((42, 'fred'), func('fred'))
-
   def test_create_bad_targets(self):
     with self.assertRaises(TypeError):
       BuildFileAliases(targets={'fred': object()})
 
-    target = Target('fred', Address.parse('a:b'), BuildGraph(address_mapper=None))
+    target = Target('fred', Address.parse('a:b'), MutableBuildGraph(address_mapper=None))
     with self.assertRaises(TypeError):
       BuildFileAliases(targets={'fred': target})
 

@@ -24,7 +24,10 @@ logger = logging.getLogger(__name__)
 
 
 class Executor(AbstractClass):
-  """Executes java programs."""
+  """Executes java programs.
+
+  :API: public
+  """
 
   @staticmethod
   def _scrub_args(classpath, main, jvm_options, args, cwd):
@@ -36,7 +39,10 @@ class Executor(AbstractClass):
     return classpath, main, jvm_options, args, cwd
 
   class Error(Exception):
-    """Indicates an error launching a java program."""
+    """Indicates an error launching a java program.
+
+    :API: public
+    """
 
   class InvalidDistribution(ValueError):
     """Indicates an invalid Distribution was used to construct this runner."""
@@ -47,6 +53,7 @@ class Executor(AbstractClass):
     @abstractproperty
     def executor(self):
       """Returns the executor this runner uses to run itself."""
+      raise NotImplementedError
 
     @property
     def cmd(self):
@@ -56,6 +63,7 @@ class Executor(AbstractClass):
     @abstractproperty
     def command(self):
       """Returns a copy of the command line that will be run as a list of command line tokens."""
+      raise NotImplementedError
 
     @abstractmethod
     def run(self, stdout=None, stderr=None, cwd=None):
@@ -68,10 +76,16 @@ class Executor(AbstractClass):
       :param stderr: An optional stream to pump stderr to; defaults to `sys.stderr`.
       :param string cwd: optionally set the working directory
       """
+      raise NotImplementedError
 
     @abstractmethod
-    def kill(self):
-      """Terminates the java command."""
+    def spawn(self, stdout=None, stderr=None, cwd=None):
+      """Spawns the configured java command.
+
+      :param stdout: An optional stream to pump stdout to; defaults to `sys.stdout`.
+      :param stderr: An optional stream to pump stderr to; defaults to `sys.stderr`.
+      :param string cwd: optionally set the working directory
+      """
       raise NotImplementedError
 
   def __init__(self, distribution):
@@ -107,9 +121,9 @@ class Executor(AbstractClass):
     Returns the exit code of the java program.
     Raises Executor.Error if there was a problem launching java itself.
     """
-    executor = self.runner(classpath=classpath, main=main, jvm_options=jvm_options, args=args,
+    runner = self.runner(classpath=classpath, main=main, jvm_options=jvm_options, args=args,
                            cwd=cwd)
-    return executor.run(stdout=stdout, stderr=stderr, cwd=cwd)
+    return runner.run(stdout=stdout, stderr=stderr)
 
   @abstractmethod
   def _runner(self, classpath, main, jvm_options, args, cwd=None):
@@ -144,8 +158,11 @@ class CommandLineGrabber(Executor):
       def command(_):
         return list(self._command)
 
-      def run(_, stdout=None, stderr=None, cwd=None):
+      def run(_, stdout=None, stderr=None):
         return 0
+
+      def spawn(_, stdout=None, stderr=None):
+        return None
 
     return Runner()
 
@@ -153,12 +170,12 @@ class CommandLineGrabber(Executor):
   def cmd(self):
     return self._command
 
-  def kill(self):
-    pass
-
 
 class SubprocessExecutor(Executor):
-  """Executes java programs by launching a jvm in a subprocess."""
+  """Executes java programs by launching a jvm in a subprocess.
+
+  :API: public
+  """
 
   _SCRUBBED_ENV = {
       # We attempt to control the classpath for correctness, caching and invalidation reasons and
@@ -205,7 +222,10 @@ class SubprocessExecutor(Executor):
       def command(_):
         return list(command)
 
-      def run(_, stdout=None, stderr=None, cwd=None):
+      def spawn(_, stdout=None, stderr=None):
+        return self._spawn(command, stdout=stdout, stderr=stderr, cwd=cwd)
+
+      def run(_, stdout=None, stderr=None):
         return self._spawn(command, stdout=stdout, stderr=stderr, cwd=cwd).wait()
 
     return Runner()
@@ -214,13 +234,13 @@ class SubprocessExecutor(Executor):
     """Spawns the java program passing any extra subprocess kwargs on to subprocess.Popen.
 
     Returns the Popen process object handle to the spawned java program subprocess.
+
+    :API: public
+
+    :raises: :class:`Executor.Error` if there is a problem spawning the subprocess.
     """
     cmd = self._create_command(*self._scrub_args(classpath, main, jvm_options, args, cwd=cwd))
     return self._spawn(cmd, cwd, **subprocess_args)
-
-  def kill(self):
-    if self._process is not None:
-      self._process.kill()
 
   def _spawn(self, cmd, cwd=None, **subprocess_args):
     with self._maybe_scrubbed_env():
@@ -228,7 +248,6 @@ class SubprocessExecutor(Executor):
       logger.debug('Executing: {cmd} args={args} at cwd={cwd}'
                    .format(cmd=' '.join(cmd), args=subprocess_args, cwd=cwd))
       try:
-        self._process = subprocess.Popen(cmd, cwd=cwd, **subprocess_args)
-        return self._process
+        return subprocess.Popen(cmd, cwd=cwd, **subprocess_args)
       except OSError as e:
         raise self.Error('Problem executing {0}: {1}'.format(self._distribution.java, e))

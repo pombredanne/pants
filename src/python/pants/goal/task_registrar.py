@@ -13,6 +13,10 @@ from pants.goal.goal import Goal
 
 
 class TaskRegistrar(object):
+  """
+  :API: public
+  """
+
   def __init__(self, name, action, dependencies=None, serialize=True):
     """
     :param name: the name of the task.
@@ -28,7 +32,7 @@ class TaskRegistrar(object):
 
     if dependencies:
       # TODO(John Sirois): kill this warning and the kwarg after a deprecation cycle.
-      print(dedent('''
+      print(dedent("""
           WARNING: Registered dependencies are now ignored and only `Task.product_types`
           and product requirements as expressed in `Task.prepare` are used to
           infer Task dependencies.
@@ -36,7 +40,7 @@ class TaskRegistrar(object):
           Please fix this registration:
             {reg}
             {location}
-          ''').format(reg=self,
+          """).format(reg=self,
                       location=traceback.format_list([traceback.extract_stack()[-2]])[0]),
             file=sys.stderr)
 
@@ -47,6 +51,9 @@ class TaskRegistrar(object):
 
   @property
   def task_type(self):
+    """
+    :API: public
+    """
     return self._task
 
   def install(self, goal=None, first=False, replace=False, before=None, after=None):
@@ -55,6 +62,8 @@ class TaskRegistrar(object):
     The placement of the task in the execution list of the goal defaults to the end but can be
     :rtype : object
     influence by specifying exactly one of the following arguments:
+
+    :API: public
 
     :param first: Places this task 1st in the goal's execution list.
     :param replace: Replaces any existing tasks in the goal with this goal.

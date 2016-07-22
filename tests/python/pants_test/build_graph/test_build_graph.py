@@ -5,8 +5,12 @@
 from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
                         unicode_literals, with_statement)
 
+from collections import defaultdict
+
 import six
 
+from pants.backend.jvm.targets.jar_dependency import JarDependency
+from pants.backend.jvm.targets.jar_library import JarLibrary
 from pants.build_graph.address import Address, parse_spec
 from pants.build_graph.address_lookup_error import AddressLookupError
 from pants.build_graph.build_graph import BuildGraph
@@ -243,8 +247,7 @@ class BuildGraphTest(BaseTest):
     self.build_graph.inject_address_closure(Address.parse(spec))
 
   def test_invalid_address(self):
-    with self.assertRaisesRegexp(AddressLookupError,
-                                 '^BUILD file does not exist at:.*/BUILD'):
+    with self.assertRaisesRegexp(AddressLookupError, '^.* does not contain any BUILD files.$'):
       self.inject_address_closure('//:a')
 
     self.add_to_build_file('BUILD',
@@ -252,7 +255,7 @@ class BuildGraphTest(BaseTest):
                            '  dependencies=["non-existent-path:b"],'
                            ')')
     with self.assertRaisesRegexp(BuildGraph.TransitiveLookupError,
-                                 '^BUILD file does not exist at:.*/non-existent-path/BUILD'
+                                 '^.*/non-existent-path does not contain any BUILD files.'
                                  '\s+when translating spec non-existent-path:b'
                                  '\s+referenced from //:a$'):
       self.inject_address_closure('//:a')
@@ -267,11 +270,22 @@ class BuildGraphTest(BaseTest):
                            '  dependencies=["non-existent-path:c"],'
                            ')')
     with self.assertRaisesRegexp(BuildGraph.TransitiveLookupError,
-                                 '^BUILD file does not exist at: .*/non-existent-path/BUILD'
+                                 '^.*/non-existent-path does not contain any BUILD files.'
                                  '\s+when translating spec non-existent-path:c'
                                  '\s+referenced from goodpath:b'
                                  '\s+referenced from //:a$'):
       self.inject_address_closure('//:a')
+
+  def test_synthetic_address(self):
+    """Verify that synthetic targets don't raise an exception on inject_address_closure"""
+    self.build_graph.inject_synthetic_target(
+       Address.parse('//:synth_library_address'),
+       JarLibrary,
+       jars=[JarDependency(org = 'org.scala-lang',
+                           name = 'scala-library',
+                           rev = '2.11.5')]
+    )
+    self.inject_address_closure('//:synth_library_address')
 
   def test_invalid_address_two_hops_same_file(self):
     self.add_to_build_file('BUILD',
@@ -286,7 +300,7 @@ class BuildGraphTest(BaseTest):
                            '  dependencies=["non-existent-path:d"],'
                            ')')
     with self.assertRaisesRegexp(BuildGraph.TransitiveLookupError,
-                                 '^BUILD file does not exist at:.*/non-existent-path/BUILD'
+                                 '^.*/non-existent-path does not contain any BUILD files.'
                                  '\s+when translating spec non-existent-path:d'
                                  '\s+referenced from goodpath:c'
                                  '\s+referenced from goodpath:b'
@@ -308,3 +322,49 @@ class BuildGraphTest(BaseTest):
         '^Addresses in dependencies must be unique. \'other:b\' is referenced more than once.'
         '\s+referenced from //:a$'):
       self.inject_address_closure('//:a')
+
+  def test_leveled_predicate(self):
+    a = self.make_target(spec='a')
+    b = self.make_target(spec='b', dependencies=[a])
+    c = self.make_target(spec='c', dependencies=[b])
+    d = self.make_target(spec='d', dependencies=[a])
+
+    subgraph_funcs = (self.build_graph.transitive_subgraph_of_addresses,
+                      self.build_graph.transitive_subgraph_of_addresses_bfs)
+
+    def check_funcs(expected, roots, **kwargs):
+      for func in subgraph_funcs:
+        seen_targets = defaultdict(lambda: 0)
+        def predicate_sees(target):
+          seen_targets[target] += 1
+          return True
+
+        result = func([t.address for t in roots], predicate=predicate_sees, **kwargs)
+        self.assertEquals(set(expected), set(result))
+        if any(ct > 1 for ct in seen_targets.values()):
+          self.fail('func {} visited {} more than once.'.format(
+            func,
+            ', '.join(t.address for t, ct in seen_targets.items() if ct > 1))
+          )
+
+    def only_roots(_, __):
+      # This is a silly constraint, because it effectively turns the transitive subgraph functions
+      # into the identity function.
+      return False
+
+    def only_direct_deps(_, depth):
+      return depth == 0
+
+    def only_indirect_a(target, depth):
+      # This is a really weird constraint just to demonstrate functionality.
+      return target != a or depth > 0
+
+    check_funcs({a, b, d}, {b, d}, leveled_predicate=None)
+    check_funcs({b, d}, {b, d}, leveled_predicate=only_roots)
+    check_funcs({a, b, d}, {b, d}, leveled_predicate=only_direct_deps)
+    check_funcs({d, a}, {d}, leveled_predicate=only_direct_deps)
+    check_funcs({b, c}, {c}, leveled_predicate=only_direct_deps)
+    check_funcs({b, c, d, a}, {c, d}, leveled_predicate=only_direct_deps)
+    check_funcs({b, d}, {b, d}, leveled_predicate=only_indirect_a)
+    check_funcs({a, b, c, d}, {c, d}, leveled_predicate=only_indirect_a)
+    check_funcs({a, b, c}, {c}, leveled_predicate=only_indirect_a)

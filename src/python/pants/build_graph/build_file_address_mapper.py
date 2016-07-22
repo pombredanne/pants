@@ -5,12 +5,27 @@
 from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
                         unicode_literals, with_statement)
 
+import logging
+import os
+import re
+import traceback
+from collections import defaultdict
+
+import six
+from pathspec import PathSpec
+from pathspec.gitignore import GitIgnorePattern
+from twitter.common.collections import OrderedSet
+
 from pants.base.build_environment import get_buildroot
 from pants.base.build_file import BuildFile
+from pants.base.specs import DescendantAddresses, SiblingAddresses, SingleAddress
 from pants.build_graph.address import Address, parse_spec
 from pants.build_graph.address_lookup_error import AddressLookupError
 from pants.build_graph.build_file_parser import BuildFileParser
 from pants.util.dirutil import fast_relpath
+
+
+logger = logging.getLogger(__name__)
 
 
 # Note: Significant effort has been made to keep the types BuildFile, BuildGraph, Address, and
@@ -24,8 +39,7 @@ from pants.util.dirutil import fast_relpath
 #
 # Note: 'spec' should not be a user visible term, substitute 'address' instead.
 class BuildFileAddressMapper(object):
-  """Maps addresses in the pants virtual address space to corresponding BUILD file declarations.
-  """
+  """Maps addresses in the pants virtual address space to corresponding BUILD file declarations."""
 
   class AddressNotInBuildFile(AddressLookupError):
     """Indicates an address cannot be found in an existing BUILD file."""
@@ -45,7 +59,12 @@ class BuildFileAddressMapper(object):
   class InvalidRootError(BuildFileScanError):
     """Indicates an invalid scan root was supplied."""
 
-  def __init__(self, build_file_parser, build_file_type):
+  # Target specs are mapped to the patterns which match them, if any. This variable is a key for
+  # specs which don't match any exclusion regexps. We know it won't already be in the list of
+  # patterns, because the asterisks in its name make it an invalid regexp.
+  _UNMATCHED_KEY = '** unmatched **'
+
+  def __init__(self, build_file_parser, project_tree, build_ignore_patterns=None, exclude_target_regexps=None):
     """Create a BuildFileAddressMapper.
 
     :param build_file_parser: An instance of BuildFileParser
@@ -53,59 +72,47 @@ class BuildFileAddressMapper(object):
     """
     self._build_file_parser = build_file_parser
     self._spec_path_to_address_map_map = {}  # {spec_path: {address: addressable}} mapping
-    self._build_file_type = build_file_type
+    self._project_tree = project_tree
+    self._build_ignore_patterns = PathSpec.from_lines(GitIgnorePattern, build_ignore_patterns or [])
+
+    self._exclude_target_regexps = exclude_target_regexps or []
+    self._exclude_patterns = [re.compile(pattern) for pattern in self._exclude_target_regexps]
 
   @property
   def root_dir(self):
     return self._build_file_parser.root_dir
 
-  def _raise_incorrect_address_error(self, build_file, wrong_target_name, targets):
+  def _raise_incorrect_address_error(self, spec_path, wrong_target_name, targets):
     """Search through the list of targets and return those which originate from the same folder
     which wrong_target_name resides in.
 
     :raises: A helpful error message listing possible correct target addresses.
     """
-    def path_parts(build):  # Gets a tuple of directory, filename.
-      build = str(build)
-      slash = build.rfind('/')
-      if slash < 0:
-        return '', build
-      return build[:slash], build[slash + 1:]
+    was_not_found_message = '{target_name} was not found in BUILD files from {spec_path}'.format(
+      target_name=wrong_target_name, spec_path=os.path.join(self._project_tree.build_root, spec_path))
 
-    def are_siblings(a, b):  # Are the targets in the same directory?
-      return path_parts(a)[0] == path_parts(b)[0]
+    if not targets:
+      raise self.EmptyBuildFileError(
+        '{was_not_found_message}, because that directory contains no BUILD files defining addressable entities.'
+          .format(was_not_found_message=was_not_found_message))
 
-    valid_specs = []
-    all_same = True
-    # Iterate through all addresses, saving those which are similar to the wrong address.
-    for target in targets:
-      if are_siblings(target.build_file, build_file):
-        possibility = (path_parts(target.build_file)[1], target.spec[target.spec.rfind(':'):])
-        # Keep track of whether there are multiple BUILD files or just one.
-        if all_same and valid_specs and possibility[0] != valid_specs[0][0]:
-          all_same = False
-        valid_specs.append(possibility)
+    # Print BUILD file extensions if there's more than one BUILD file with targets only.
+    if len(set([target.build_file for target in targets])) == 1:
+      specs = [':{}'.format(target.target_name) for target in targets]
+    else:
+      specs = [':{} (from {})'.format(target.target_name, os.path.basename(target.build_file.relpath))
+               for target in targets]
 
-    # Trim out BUILD extensions if there's only one anyway; no need to be redundant.
-    if all_same:
-      valid_specs = [('', tail) for head, tail in valid_specs]
     # Might be neat to sort by edit distance or something, but for now alphabetical is fine.
-    valid_specs = [''.join(pair) for pair in sorted(valid_specs)]
+    specs = [''.join(pair) for pair in sorted(specs)]
 
     # Give different error messages depending on whether BUILD file was empty.
-    if valid_specs:
-      one_of = ' one of' if len(valid_specs) > 1 else ''  # Handle plurality, just for UX.
-      raise self.AddressNotInBuildFile(
-        '{target_name} was not found in BUILD file {build_file}. Perhaps you '
-        'meant{one_of}: \n  {specs}'.format(target_name=wrong_target_name,
-                                             build_file=build_file,
-                                             one_of=one_of,
-                                             specs='\n  '.join(valid_specs)))
-    # There were no targets in the BUILD file.
-    raise self.EmptyBuildFileError(
-      ':{target_name} was not found in BUILD file {build_file}, because that '
-      'BUILD file contains no addressable entities.'.format(target_name=wrong_target_name,
-                                                             build_file=build_file))
+    one_of = ' one of' if len(specs) > 1 else ''  # Handle plurality, just for UX.
+    raise self.AddressNotInBuildFile(
+      '{was_not_found_message}. Perhaps you '
+      'meant{one_of}: \n  {specs}'.format(was_not_found_message=was_not_found_message,
+                                          one_of=one_of,
+                                          specs='\n  '.join(specs)))
 
   def resolve(self, address):
     """Maps an address in the virtual address space to an object.
@@ -116,9 +123,7 @@ class BuildFileAddressMapper(object):
     """
     address_map = self._address_map_from_spec_path(address.spec_path)
     if address not in address_map:
-      build_file = self._build_file_type.from_cache(self.root_dir, address.spec_path,
-                                                    must_exist=False)
-      self._raise_incorrect_address_error(build_file, address.target_name, address_map)
+      self._raise_incorrect_address_error(address.spec_path, address.target_name, address_map)
     else:
       return address_map[address]
 
@@ -133,18 +138,16 @@ class BuildFileAddressMapper(object):
 
   def _address_map_from_spec_path(self, spec_path):
     """Returns a resolution map of all addresses in a "directory" in the virtual address space.
-
     :returns {Address: (Address, <resolved Object>)}:
     """
     if spec_path not in self._spec_path_to_address_map_map:
       try:
-        try:
-          build_file = self._build_file_type.from_cache(self.root_dir, spec_path)
-        except BuildFile.BuildFileError as e:
-          raise self.BuildFileScanError("{message}\n searching {spec_path}"
-                                        .format(message=e,
-                                                spec_path=spec_path))
-        mapping = self._build_file_parser.address_map_from_build_file(build_file)
+        build_files = list(BuildFile.get_build_files_family(self._project_tree, spec_path,
+                                                            self._build_ignore_patterns))
+        if not build_files:
+          raise self.BuildFileScanError("{spec_path} does not contain any BUILD files."
+                                        .format(spec_path=os.path.join(self.root_dir, spec_path)))
+        mapping = self._build_file_parser.address_map_from_build_files(build_files)
       except BuildFileParser.BuildFileParserError as e:
         raise AddressLookupError("{message}\n Loading addresses from '{spec_path}' failed."
                                  .format(message=e, spec_path=spec_path))
@@ -157,47 +160,39 @@ class BuildFileAddressMapper(object):
     """Returns only the addresses gathered by `address_map_from_spec_path`, with no values."""
     return self._address_map_from_spec_path(spec_path).keys()
 
-  def from_cache(self, *args, **kwargs):
-    """Return a BuildFile instance.  Args as per BuildFile.from_cache
-
-    :returns: a BuildFile
-    """
-    return self._build_file_type.from_cache(*args, **kwargs)
-
   def spec_to_address(self, spec, relative_to=''):
-    """A helper method for mapping a spec to the correct address.
+    """A helper method for mapping a spec to the correct build file address.
 
     :param string spec: A spec to lookup in the map.
     :param string relative_to: Path the spec might be relative to
     :raises :class:`pants.build_graph.address_lookup_error.AddressLookupError`
             If the BUILD file cannot be found in the path specified by the spec.
     :returns: A new Address instance.
-    :rtype: :class:`pants.build_graph.address.Address`
+    :rtype: :class:`pants.build_graph.address.BuildFileAddress`
     """
-    spec_path, name = parse_spec(spec, relative_to=relative_to)
     try:
-      self.from_cache(self.root_dir, spec_path)
-    except BuildFile.BuildFileError as e:
+      spec_path, name = parse_spec(spec, relative_to=relative_to)
+      address = Address(spec_path, name)
+      build_file_address, _ = self.resolve(address)
+      return build_file_address
+    except (ValueError, AddressLookupError) as e:
       raise self.InvalidBuildFileReference('{message}\n  when translating spec {spec}'
                                            .format(message=e, spec=spec))
-    return Address(spec_path, name)
 
-  def scan_buildfiles(self, root_dir, *args, **kwargs):
-    """Looks for all BUILD files in root_dir or its descendant directories.
-
-    :returns: an OrderedSet of BuildFile instances.
-    """
-    return self._build_file_type.scan_buildfiles(root_dir, *args, **kwargs)
+  def scan_build_files(self, base_path):
+    return BuildFile.scan_build_files(self._project_tree, base_path,
+                                      build_ignore_patterns=self._build_ignore_patterns)
 
   def specs_to_addresses(self, specs, relative_to=''):
     """The equivalent of `spec_to_address` for a group of specs all relative to the same path.
+
     :param spec: iterable of Addresses.
     :raises AddressLookupError: if the BUILD file cannot be found in the path specified by the spec
     """
     for spec in specs:
       yield self.spec_to_address(spec, relative_to=relative_to)
 
-  def scan_addresses(self, root=None, spec_excludes=None):
+  def scan_addresses(self, root=None):
     """Recursively gathers all addresses visible under `root` of the virtual address space.
 
     :param string root: The absolute path of the root to scan; defaults to the root directory of the
@@ -216,9 +211,9 @@ class BuildFileAddressMapper(object):
 
     addresses = set()
     try:
-      for build_file in self._build_file_type.scan_buildfiles(root_dir=root_dir,
-                                                              base_path=base_path,
-                                                              spec_excludes=spec_excludes):
+      for build_file in BuildFile.scan_build_files(self._project_tree,
+                                                   base_relpath=base_path,
+                                                   build_ignore_patterns=self._build_ignore_patterns):
         for address in self.addresses_in_spec_path(build_file.spec_path):
           addresses.add(address)
     except BuildFile.BuildFileError as e:
@@ -226,3 +221,74 @@ class BuildFileAddressMapper(object):
       raise self.BuildFileScanError("{message}\n while scanning BUILD files in '{root}'."
                                     .format(message=e, root=root))
     return addresses
+
+  def scan_specs(self, specs, fail_fast=True):
+    """Execute a collection of `specs.Spec` objects and return an ordered set of Addresses."""
+    excluded_target_map = defaultdict(set)  # pattern -> targets (for debugging)
+
+    def exclude_spec(spec):
+      for pattern in self._exclude_patterns:
+        if pattern.search(spec) is not None:
+          excluded_target_map[pattern.pattern].add(spec)
+          return True
+      excluded_target_map[self._UNMATCHED_KEY].add(spec)
+      return False
+
+    def exclude_address(address):
+      return exclude_spec(address.spec)
+
+    addresses = OrderedSet()
+    for spec in specs:
+      for address in self._scan_spec(spec, fail_fast, exclude_spec):
+        if not exclude_address(address):
+          addresses.add(address)
+
+    # Print debug information about the excluded targets
+    if logger.getEffectiveLevel() <= logging.DEBUG and excluded_target_map:
+      logger.debug('excludes:\n  {excludes}'
+                   .format(excludes='\n  '.join(self._exclude_target_regexps)))
+      targets = ', '.join(excluded_target_map[self._UNMATCHED_KEY])
+      logger.debug('Targets after excludes: %s', targets)
+      excluded_count = 0
+      for pattern, targets in six.iteritems(excluded_target_map):
+        if pattern != self._UNMATCHED_KEY:
+          logger.debug('Targets excluded by pattern {pattern}\n  {targets}'
+                       .format(pattern=pattern,
+                               targets='\n  '.join(targets)))
+          excluded_count += len(targets)
+      logger.debug('Excluded {count} target{plural}.'
+                   .format(count=excluded_count,
+                           plural=('s' if excluded_count != 1 else '')))
+    return addresses
+
+  def _scan_spec(self, spec, fail_fast, exclude_spec):
+    """Scans the given address spec."""
+
+    errored_out = []
+
+    if type(spec) is DescendantAddresses:
+      addresses = set()
+      try:
+        build_files = self.scan_build_files(base_path=spec.directory)
+      except BuildFile.BuildFileError as e:
+        raise AddressLookupError(e)
+
+      for build_file in build_files:
+        try:
+          addresses.update(self.addresses_in_spec_path(build_file.spec_path))
+        except (BuildFile.BuildFileError, AddressLookupError) as e:
+          if fail_fast:
+            raise AddressLookupError(e)
+          errored_out.append('--------------------')
+          errored_out.append(traceback.format_exc())
+          errored_out.append('Exception message: {0}'.format(e))
+      if errored_out:
+        error_msg = '\n'.join(errored_out + ["Invalid BUILD files for [{0}]".format(spec.to_spec_string())])
+        raise AddressLookupError(error_msg)
+      return addresses
+    elif type(spec) is SiblingAddresses:
+      return set(self.addresses_in_spec_path(spec.directory))
+    elif type(spec) is SingleAddress:
+      return {self.spec_to_address(spec.to_spec_string())}
+    else:
+      raise ValueError('Unsupported Spec type: {}'.format(spec))

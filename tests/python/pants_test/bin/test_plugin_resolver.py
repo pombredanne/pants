@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from textwrap import dedent
 
 import pytest
+from pex.crawler import Crawler
 from pex.installer import Packager
 from pex.resolver import Unsatisfiable
 from pkg_resources import Requirement, WorkingSet
@@ -68,8 +69,9 @@ def plugin_resolution(chroot=None, plugins=None):
     configpath = os.path.join(root_dir, 'pants.ini')
     if create_artifacts:
       touch(configpath)
+    args = ["--pants-config-files=['{}']".format(configpath)]
 
-    options_bootstrapper = OptionsBootstrapper(env=env, configpath=configpath, args=[])
+    options_bootstrapper = OptionsBootstrapper(env=env, args=args)
     plugin_resolver = PluginResolver(options_bootstrapper)
     cache_dir = plugin_resolver.plugin_cache_dir
     yield plugin_resolver.resolve(WorkingSet(entries=[])), root_dir, repo_dir, cache_dir
@@ -121,6 +123,7 @@ def test_inexact_requirements():
     # pex to a TLL expiry resolve and then fail.
     safe_rmtree(repo_dir)
     safe_rmtree(cache_dir)
+    Crawler.reset_cache()
     time.sleep(1.5)
 
     with pytest.raises(Unsatisfiable):

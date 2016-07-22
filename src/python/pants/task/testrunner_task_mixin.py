@@ -6,9 +6,8 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
                         unicode_literals, with_statement)
 
 from abc import abstractmethod
-from textwrap import dedent
+from threading import Timer
 
-from pants.base.deprecated import deprecated_conditional
 from pants.base.exceptions import TestFailedTaskError
 from pants.util.timeout import Timeout, TimeoutReached
 
@@ -23,8 +22,8 @@ class TestRunnerTaskMixin(object):
   @classmethod
   def register_options(cls, register):
     super(TestRunnerTaskMixin, cls).register_options(register)
-    register('--skip', action='store_true', help='Skip running tests.')
-    register('--timeouts', action='store_true', default=True,
+    register('--skip', type=bool, help='Skip running tests.')
+    register('--timeouts', type=bool, default=True,
              help='Enable test target timeouts. If timeouts are enabled then tests with a timeout= parameter '
              'set on their target will time out after the given number of seconds if not completed. '
              'If no timeout is set, then either the default timeout is used or no timeout is configured. '
@@ -32,10 +31,12 @@ class TestRunnerTaskMixin(object):
              'all tests are run with the total timeout covering the entire run of tests. If a single target '
              'in a test run has no timeout and there is no default, the entire run will have no timeout. This '
              'should change in the future to provide more granularity.')
-    register('--timeout-default', action='store', type=int, advanced=True,
+    register('--timeout-default', type=int, advanced=True,
              help='The default timeout (in seconds) for a test if timeout is not set on the target.')
-    register('--timeout-maximum', action='store', type=int, advanced=True,
+    register('--timeout-maximum', type=int, advanced=True,
              help='The maximum timeout (in seconds) that can be set on a test target.')
+    register('--timeout-terminate-wait', type=int, advanced=True, default=10,
+             help='If a test does not terminate on a SIGTERM, how long to wait (in seconds) before sending a SIGKILL.')
 
   def execute(self):
     """Run the task."""
@@ -57,24 +58,67 @@ class TestRunnerTaskMixin(object):
       for target in test_targets:
         self._validate_target(target)
 
-      timeout = self._timeout_for_targets(test_targets)
+      self._execute(all_targets)
 
-      try:
-        with Timeout(timeout, abort_handler=self._timeout_abort_handler):
-          self._execute(all_targets)
-      except TimeoutReached as e:
-        raise TestFailedTaskError(str(e), failed_targets=test_targets)
+  def _get_test_targets_for_spawn(self):
+    """Invoked by _spawn_and_wait to know targets being executed. Defaults to _get_test_targets().
+
+    _spawn_and_wait passes all its arguments through to _spawn, but it needs to know what targets
+    are being executed by _spawn. A caller to _spawn_and_wait can override this method to return
+    the targets being executed by the current _spawn_and_wait. By default it returns
+    _get_test_targets(), which is all test targets.
+    """
+    return self._get_test_targets()
+
+  def _spawn_and_wait(self, *args, **kwargs):
+    """Spawn the actual test runner process, and wait for it to complete."""
+
+    test_targets = self._get_test_targets_for_spawn()
+    timeout = self._timeout_for_targets(test_targets)
+
+    process_handler = self._spawn(*args, **kwargs)
+
+    def _graceful_terminate(handler, wait_time):
+      """
+      Returns a function which attempts to terminate the process gracefully.
+
+      If terminate doesn't work after wait_time seconds, do a kill.
+      """
+
+      def terminator():
+        handler.terminate()
+        def kill_if_not_terminated():
+          if handler.poll() is None:
+            # We can't use the context logger because it might not exist.
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warn("Timed out test did not terminate gracefully after %s seconds, killing..." % wait_time)
+            handler.kill()
+
+        timer = Timer(wait_time, kill_if_not_terminated)
+        timer.start()
+
+      return terminator
+
+    try:
+      with Timeout(timeout,
+                   threading_timer=Timer,
+                   abort_handler=_graceful_terminate(process_handler, self.get_options().timeout_terminate_wait)):
+        return process_handler.wait()
+    except TimeoutReached as e:
+      raise TestFailedTaskError(str(e), failed_targets=test_targets)
+
+  @abstractmethod
+  def _spawn(self, *args, **kwargs):
+    """Spawn the actual test runner process.
+
+    :rtype: ProcessHandler
+    """
+
+    raise NotImplementedError
 
   def _timeout_for_target(self, target):
     timeout = getattr(target, 'timeout', None)
-    deprecated_conditional(
-      lambda: timeout == 0,
-      "0.0.65",
-      hint_message=dedent("""
-        Target {target} has parameter: 'timeout=0', which is deprecated.
-        To use the default timeout remove the 'timeout' parameter from your test target.
-      """.format(target=target.address.spec)))
-
     timeout_maximum = self.get_options().timeout_maximum
     if timeout is not None and timeout_maximum is not None:
       if timeout > timeout_maximum:
@@ -140,15 +184,12 @@ class TestRunnerTaskMixin(object):
     return test_targets
 
   @abstractmethod
-  def _timeout_abort_handler(self):
-    """Abort the test process when it has been timed out."""
-
-  @abstractmethod
   def _test_target_filter(self):
     """A filter to run on targets to see if they are relevant to this test task.
 
     :return: function from target->boolean
     """
+    raise NotImplementedError
 
   @abstractmethod
   def _validate_target(self, target):
@@ -156,10 +197,11 @@ class TestRunnerTaskMixin(object):
 
     We don't need the type check here because _get_targets() combines with _test_target_type to
     filter the list of targets to only the targets relevant for this test task.
-im
+
     :param target: the target to validate
     :raises: TargetDefinitionException
     """
+    raise NotImplementedError
 
   @abstractmethod
   def _execute(self, all_targets):
@@ -167,3 +209,4 @@ im
 
     :param targets: list of the targets whose tests are to be run
     """
+    raise NotImplementedError

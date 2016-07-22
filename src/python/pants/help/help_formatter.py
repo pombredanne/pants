@@ -13,6 +13,7 @@ from pants.help.help_info_extracter import HelpInfoExtracter
 
 
 class HelpFormatter(object):
+
   def __init__(self, scope, show_recursive, show_advanced, color):
     self._scope = scope
     self._show_recursive = show_recursive
@@ -82,6 +83,6 @@ class HelpFormatter(object):
     lines.extend(['{}{}'.format(indent, s) for s in wrap(ohi.help, 76)])
     if ohi.deprecated_message:
       lines.append(self._maybe_red('{}{}.'.format(indent, ohi.deprecated_message)))
-      if ohi.deprecated_hint:
-        lines.append(self._maybe_red('{}{}'.format(indent, ohi.deprecated_hint)))
+      if ohi.removal_hint:
+        lines.append(self._maybe_red('{}{}'.format(indent, ohi.removal_hint)))
     return lines

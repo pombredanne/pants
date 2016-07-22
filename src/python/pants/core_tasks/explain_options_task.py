@@ -7,8 +7,10 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 
 from colors import black, blue, cyan, green, magenta, red, white
 
+from pants.base.revision import Revision
 from pants.option.ranked_value import RankedValue
 from pants.task.console_task import ConsoleTask
+from pants.version import PANTS_SEMVER
 
 
 class ExplainOptionsTask(ConsoleTask):
@@ -26,10 +28,12 @@ class ExplainOptionsTask(ConsoleTask):
     register('--name', help='Only show options with this name.')
     register('--rank', choices=RankedValue.get_names(),
              help='Only show options with at least this importance.')
-    register('--show-history', action='store_true', default=False,
+    register('--show-history', type=bool,
              help='Show the previous values options had before being overridden.')
-    register('--only-overridden', action='store_true', default=False,
+    register('--only-overridden', type=bool,
              help='Only show values that overrode defaults.')
+    register('--skip-inherited', type=bool, default=True,
+             help='Do not show inherited options, unless their values differ from their parents.')
 
   def _scope_filter(self, scope):
     pattern = self.get_options().scope
@@ -87,15 +91,38 @@ class ExplainOptionsTask(ConsoleTask):
     for scope in scopes:
       self.context.options.for_scope(scope)
 
+  def _get_parent_scope_option(self, scope, name):
+    if not scope:
+      return None, None
+    parent_scope = ''
+    if '.' in scope:
+      parent_scope, _ = scope.rsplit('.', 1)
+    options = self.context.options.for_scope(parent_scope)
+    try:
+      return parent_scope, options[name]
+    except AttributeError:
+      return None, None
+
   def console_output(self, targets):
     self._force_option_parsing()
     for scope, options in sorted(self.context.options.tracker.option_history_by_scope.items()):
-      if not self._scope_filter(scope): continue
+      if not self._scope_filter(scope):
+        continue
       for option, history in sorted(options.items()):
-        if not self._option_filter(option): continue
-        if not self._rank_filter(history.latest.rank): continue
+        if not self._option_filter(option):
+          continue
+        if not self._rank_filter(history.latest.rank):
+          continue
         if self.get_options().only_overridden and not history.was_overridden:
           continue
+        # Skip the option if it has already passed the deprecation period.
+        if history.latest.deprecation_version and PANTS_SEMVER >= Revision.semver(
+          history.latest.deprecation_version):
+          continue
+        if self.get_options().skip_inherited:
+          parent_scope, parent_value = self._get_parent_scope_option(scope, option)
+          if parent_scope is not None and parent_value == history.latest.value:
+            continue
         yield '{} = {}'.format(self._format_scope(scope, option),
                                self._format_record(history.latest))
         if self.get_options().show_history:

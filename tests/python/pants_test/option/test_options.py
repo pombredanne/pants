@@ -13,17 +13,18 @@ import warnings
 from contextlib import contextmanager
 from textwrap import dedent
 
-from pants.base.deprecated import PastRemovalVersionError
+from pants.base.deprecated import CodeRemovedError
 from pants.option.arg_splitter import GLOBAL_SCOPE
 from pants.option.config import Config
-from pants.option.custom_types import dict_option, file_option, list_option, target_list_option
-from pants.option.errors import (BooleanOptionImplicitVal, BooleanOptionNameWithNo,
-                                 BooleanOptionType, FrozenRegistration, ImplicitValIsNone,
-                                 InvalidAction, InvalidKwarg, NoOptionNames, OptionNameDash,
+from pants.option.custom_types import file_option, target_option
+from pants.option.errors import (BooleanOptionNameWithNo, FrozenRegistration, ImplicitValIsNone,
+                                 InvalidKwarg, InvalidMemberType, MemberTypeNotAllowed,
+                                 NoOptionNames, OptionAlreadyRegistered, OptionNameDash,
                                  OptionNameDoubleDash, ParseError, RecursiveSubsystemOption,
                                  Shadowing)
 from pants.option.global_options import GlobalOptionsRegistrar
 from pants.option.option_tracker import OptionTracker
+from pants.option.optionable import Optionable
 from pants.option.options import Options
 from pants.option.options_bootstrapper import OptionsBootstrapper
 from pants.option.parser import Parser
@@ -62,29 +63,34 @@ class OptionsTest(unittest.TestCase):
     def register_global(*args, **kwargs):
       options.register(GLOBAL_SCOPE, *args, **kwargs)
 
-    register_global('-z', '--verbose', action='store_true', help='Verbose output.', recursive=True)
+    register_global('-z', '--verbose', type=bool, help='Verbose output.', recursive=True)
     register_global('-n', '--num', type=int, default=99, recursive=True, fingerprint=True)
-    register_global('--y', action='append', type=int)
-    register_global('--config-override', action='append')
+    register_global('--y', type=list, member_type=int)
+    register_global('--config-override', type=list)
 
     register_global('--pants-foo')
     register_global('--bar-baz')
-    register_global('--store-true-flag', action='store_true', fingerprint=True)
-    register_global('--store-false-flag', action='store_false')
-    register_global('--store-true-def-true-flag', action='store_true', default=True)
-    register_global('--store-true-def-false-flag', action='store_true', default=False)
-    register_global('--store-false-def-false-flag', action='store_false', default=False)
-    register_global('--store-false-def-true-flag', action='store_false', default=True)
+    register_global('--store-true-flag', type=bool, fingerprint=True)
+    register_global('--store-false-flag', type=bool, implicit_value=False)
+    register_global('--store-true-def-true-flag', type=bool, default=True)
+    register_global('--store-true-def-false-flag', type=bool, default=False)
+    register_global('--store-false-def-false-flag', type=bool, implicit_value=False, default=False)
+    register_global('--store-false-def-true-flag', type=bool, implicit_value=False, default=True)
 
     # Choices.
     register_global('--str-choices', choices=['foo', 'bar'])
-    register_global('--int-choices', choices=[42, 99], type=int, action='append')
+    register_global('--int-choices', choices=[42, 99], type=list, member_type=int)
 
     # Custom types.
-    register_global('--dicty', type=dict_option, default='{"a": "b"}')
-    register_global('--listy', type=list_option, default='[1, 2, 3]')
-    register_global('--target_listy', type=target_list_option, default=[':a', ':b'])
-    register_global('--filey', type=file_option, default='default.txt')
+    register_global('--listy', type=list, member_type=int, default='[1, 2, 3]')
+    register_global('--dicty', type=dict, default='{"a": "b"}')
+    register_global('--dict-listy', type=list, member_type=dict,
+                    default='[{"a": 1, "b": 2}, {"c": 3}]')
+    register_global('--targety', type=target_option, default='//:a')
+    register_global('--target-listy', type=list, member_type=target_option,
+                    default=['//:a', '//:b'])
+    register_global('--filey', type=file_option, default=None)
+    register_global('--file-listy', type=list, member_type=file_option)
 
     # Implicit value.
     register_global('--implicit-valuey', default='default', implicit_value='implicit')
@@ -94,10 +100,12 @@ class OptionsTest(unittest.TestCase):
     register_global('--b', type=int, recursive=True)
 
     # Deprecated global options
-    register_global('--global-crufty', deprecated_version='999.99.9',
-                    deprecated_hint='use a less crufty global option')
-    register_global('--global-crufty-boolean', action='store_true', deprecated_version='999.99.9',
-                    deprecated_hint='say no to crufty global options')
+    register_global('--global-crufty', removal_version='999.99.9',
+                    removal_hint='use a less crufty global option')
+    register_global('--global-crufty-boolean', type=bool, removal_version='999.99.9',
+                      removal_hint='say no to crufty global options')
+    register_global('--global-crufty-expired', removal_version='0.0.1',
+                    removal_hint='use a less crufty global option')
 
     # For the design doc example test.
     options.register('compile', '--c', type=int, recursive=True)
@@ -105,11 +113,11 @@ class OptionsTest(unittest.TestCase):
     # Test deprecated options with a scope
     options.register('stale', '--still-good')
     options.register('stale', '--crufty',
-                     deprecated_version='999.99.9',
-                     deprecated_hint='use a less crufty stale scoped option')
-    options.register('stale', '--crufty-boolean', action='store_true',
-                     deprecated_version='999.99.9',
-                     deprecated_hint='say no to crufty, stale scoped options')
+                     removal_version='999.99.9',
+                     removal_hint='use a less crufty stale scoped option')
+    options.register('stale', '--crufty-boolean', type=bool,
+                     removal_version='999.99.9',
+                     removal_hint='say no to crufty, stale scoped options')
 
     # For task identity test
     options.register('compile.scala', '--modifycompile', fingerprint=True)
@@ -124,9 +132,9 @@ class OptionsTest(unittest.TestCase):
     # For fromfile test
     options.register('fromfile', '--string', fromfile=True)
     options.register('fromfile', '--intvalue', type=int, fromfile=True)
-    options.register('fromfile', '--dictvalue', type=dict_option, fromfile=True)
-    options.register('fromfile', '--listvalue', type=list_option, fromfile=True)
-    options.register('fromfile', '--appendvalue', action='append', type=int, fromfile=True)
+    options.register('fromfile', '--dictvalue', type=dict, fromfile=True)
+    options.register('fromfile', '--listvalue', type=list, fromfile=True)
+    options.register('fromfile', '--appendvalue', type=list, member_type=int, fromfile=True)
 
   def _create_config(self, config):
     with open(os.path.join(safe_mkdtemp(), 'test_config.ini'), 'w') as fp:
@@ -147,39 +155,22 @@ class OptionsTest(unittest.TestCase):
     self._register(options)
     return options
 
-  def _parse_type_int(self, args_str, env=None, config=None, bootstrap_option_values=None,
-                      action='store'):
-    args = shlex.split(str(args_str))
-    options = Options.create(env=env or {},
-                             config=self._create_config(config or {}),
-                             known_scope_infos=OptionsTest._known_scope_infos,
-                             args=args,
-                             bootstrap_option_values=bootstrap_option_values,
-                             option_tracker=OptionTracker())
-    options.register(GLOBAL_SCOPE, '--config-override', action=action, type=int)
-    return options
-
   def test_env_type_int(self):
-    options = self._parse_type_int('./pants ',
-                                   action='append',
-                                   env={'PANTS_CONFIG_OVERRIDE': "['123','456']"})
-    self.assertEqual([123, 456], options.for_global_scope().config_override)
+    options = Options.create(env={'PANTS_FOO_BAR': "['123','456']"},
+                             config=self._create_config({}),
+                             known_scope_infos=OptionsTest._known_scope_infos,
+                             args=shlex.split('./pants'),
+                             option_tracker=OptionTracker())
+    options.register(GLOBAL_SCOPE, '--foo-bar', type=list, member_type=int)
+    self.assertEqual([123, 456], options.for_global_scope().foo_bar)
 
-    options = self._parse_type_int('./pants ', env={'PANTS_CONFIG_OVERRIDE': "123"})
-    self.assertEqual(123, options.for_global_scope().config_override)
-
-  def test_env_bad_override_var(self):
-    """Check for bad PANTS_CONFIG_OVERRIDE values.
-
-    Checks for a case where an environment variable exists like:
-
-        PANTS_CONFIG_OVERRIDE=old_style_pants.ini
-
-    Which was known to throw an unhandled NameError for 'old_style_pants' during the eval().
-    """
-    with self.assertRaisesRegexp(ParseError, 'config.*override'):
-      options = self._parse('./pants ', env={'PANTS_CONFIG_OVERRIDE': 'old_style_pants.ini'})
-      options.for_global_scope().config_override
+    options = Options.create(env={'PANTS_FOO_BAR': '123'},
+                             config=self._create_config({}),
+                             known_scope_infos=OptionsTest._known_scope_infos,
+                             args=shlex.split('./pants'),
+                             option_tracker=OptionTracker())
+    options.register(GLOBAL_SCOPE, '--foo-bar', type=int)
+    self.assertEqual(123, options.for_global_scope().foo_bar)
 
   def test_arg_scoping(self):
     # Some basic smoke tests.
@@ -207,7 +198,7 @@ class OptionsTest(unittest.TestCase):
     self.assertEqual(True, options.for_scope('test').verbose)
     self.assertEqual(False, options.for_scope('test.junit').verbose)
 
-    # Test action=append option.
+    # Test list-typed option.
     options = self._parse('./pants', config={'DEFAULT': {'y': ['88', '-99']}})
     self.assertEqual([88, -99], options.for_global_scope().y)
 
@@ -219,22 +210,31 @@ class OptionsTest(unittest.TestCase):
     self.assertEqual([], options.for_global_scope().y)
 
     options = self._parse('./pants ', env={'PANTS_CONFIG_OVERRIDE': "['123','456']"})
-    self.assertEqual(['123','456'], options.for_global_scope().config_override)
+    self.assertEqual(['123', '456'], options.for_global_scope().config_override)
 
     options = self._parse('./pants ', env={'PANTS_CONFIG_OVERRIDE': "['']"})
     self.assertEqual([''], options.for_global_scope().config_override)
 
-    # Test list-typed option.
-    options = self._parse('./pants --listy=\'["c", "d"]\'',
-                          config={'DEFAULT': {'listy': '["a", "b"]'}})
-    self.assertEqual(['c', 'd'], options.for_global_scope().listy)
+    options = self._parse('./pants --listy=\'[1, 2]\'',
+                          config={'DEFAULT': {'listy': '[3, 4]'}})
+    self.assertEqual([1, 2], options.for_global_scope().listy)
 
     # Test dict-typed option.
     options = self._parse('./pants --dicty=\'{"c": "d"}\'')
     self.assertEqual({'c': 'd'}, options.for_global_scope().dicty)
 
-    # Test target_list-typed option.
-    options = self._parse('./pants --target_listy=\'["//:foo", "//:bar"]\'')
+    # Test list-of-dict-typed option.
+    options = self._parse('./pants --dict-listy=\'[{"c": "d"}, {"e": "f"}]\'')
+    self.assertEqual([{'c': 'd'}, {'e': 'f'}], options.for_global_scope().dict_listy)
+
+    # Test target-typed option.
+    options = self._parse('./pants')
+    self.assertEqual('//:a', options.for_global_scope().targety)
+    options = self._parse('./pants --targety=//:foo')
+    self.assertEqual('//:foo', options.for_global_scope().targety)
+
+    # Test list-of-target-typed option.
+    options = self._parse('./pants --target-listy=\'["//:foo", "//:bar"]\'')
     self.assertEqual(['//:foo', '//:bar'], options.for_global_scope().target_listy)
 
     # Test file-typed option.
@@ -242,10 +242,27 @@ class OptionsTest(unittest.TestCase):
       options = self._parse('./pants --filey="{}"'.format(fp))
       self.assertEqual(fp, options.for_global_scope().filey)
 
+    # Test list-of-file-typed option.
+    with temporary_file_path() as fp1:
+      with temporary_file_path() as fp2:
+        options = self._parse('./pants --file-listy="{}" --file-listy="{}"'.format(fp1, fp2))
+        self.assertEqual([fp1, fp2], options.for_global_scope().file_listy)
+
+  def test_explicit_boolean_values(self):
+    options = self._parse('./pants --verbose=false')
+    self.assertFalse(options.for_global_scope().verbose)
+    options = self._parse('./pants --verbose=False')
+    self.assertFalse(options.for_global_scope().verbose)
+
+    options = self._parse('./pants --verbose=true')
+    self.assertTrue(options.for_global_scope().verbose)
+    options = self._parse('./pants --verbose=True')
+    self.assertTrue(options.for_global_scope().verbose)
+
   def test_boolean_defaults(self):
     options = self._parse('./pants')
     self.assertFalse(options.for_global_scope().store_true_flag)
-    self.assertFalse(options.for_global_scope().store_false_flag)
+    self.assertTrue(options.for_global_scope().store_false_flag)
     self.assertFalse(options.for_global_scope().store_true_def_false_flag)
     self.assertTrue(options.for_global_scope().store_true_def_true_flag)
     self.assertFalse(options.for_global_scope().store_false_def_false_flag)
@@ -310,7 +327,156 @@ class OptionsTest(unittest.TestCase):
                                                  }}).for_global_scope()
     with self.assertRaises(Parser.BooleanConversionError):
       self._parse('./pants', config={'DEFAULT': {'store_true_flag': 'AlmostTrue',
-                                               }}).for_global_scope()
+                                                 }}).for_global_scope()
+
+  def test_list_option(self):
+    def check(expected, args_str, env=None, config=None):
+      options = self._parse(args_str=args_str, env=env, config=config)
+      self.assertEqual(expected, options.for_global_scope().listy)
+
+    # Appending to the default.
+    check([1, 2, 3, 4], './pants --listy=4')
+    check([1, 2, 3, 4, 5], './pants --listy=4 --listy=5')
+    check([1, 2, 3, 4, 5], './pants --listy=+[4,5]')
+
+    # Filtering from the default.
+    check([1, 3], './pants --listy=-[2]')
+
+    # Replacing the default.
+    check([4, 5], './pants --listy=[4,5]')
+
+    # Appending across env, config and flags (in the right order).
+    check([1, 2, 3, 4, 5, 6, 7, 8, 9], './pants --listy=+[8,9]',
+          env={'PANTS_GLOBAL_LISTY': '+[6,7]'},
+          config={'GLOBAL': {'listy': '+[4,5]'}})
+
+    # Appending and filtering across env, config and flags (in the right order).
+    check([2, 3, 4, 7], './pants --listy=-[1,5,6]',
+          env={'PANTS_GLOBAL_LISTY': '+[6,7]'},
+          config={'GLOBAL': {'listy': '+[4,5]'}})
+
+    check([1, 2, 8, 9], './pants --listy=+[8,9]',
+          env={'PANTS_GLOBAL_LISTY': '-[4,5]'},
+          config={'GLOBAL': {'listy': '+[4,5],-[3]'}})
+
+    # Overwriting from env, then appending and filtering.
+    check([7, 8, 9], './pants --listy=+[8,9],-[6]',
+          env={'PANTS_GLOBAL_LISTY': '[6,7]'},
+          config={'GLOBAL': {'listy': '+[4,5]'}})
+
+    # Overwriting from config, then appending.
+    check([4, 5, 6, 7, 8, 9], './pants --listy=+[8,9]',
+          env={'PANTS_GLOBAL_LISTY': '+[6,7]'},
+          config={'GLOBAL': {'listy': '[4,5]'}})
+
+    # Overwriting from flags.
+    check([8, 9], './pants --listy=[8,9]',
+          env={'PANTS_GLOBAL_LISTY': '+[6,7]'},
+          config={'GLOBAL': {'listy': '+[4,5],-[8]'}})
+
+    # Filtering all instances of repeated values.
+    check([1, 2, 3, 4, 6], './pants --listy=-[5]',
+          config={'GLOBAL': {'listy': '[1, 2, 5, 3, 4, 5, 6, 5, 5]'}})
+
+    # Filtering a value even though it was appended again at a higher rank.
+    check([1, 2, 3, 5], './pants --listy=+[4]',
+          env={'PANTS_GLOBAL_LISTY': '-[4]'},
+          config={'GLOBAL': {'listy': '+[4, 5]'}})
+
+    # Filtering a value even though it was appended again at the same rank.
+    check([1, 2, 3, 5], './pants',
+          env={'PANTS_GLOBAL_LISTY': '-[4],+[4]'},
+          config={'GLOBAL': {'listy': '+[4, 5]'}})
+
+    # Overwriting cancels filters.
+    check([4], './pants',
+          env={'PANTS_GLOBAL_LISTY': '[4]'},
+          config={'GLOBAL': {'listy': '-[4]'}})
+
+  def test_dict_list_option(self):
+    def check(expected, args_str, env=None, config=None):
+      options = self._parse(args_str=args_str, env=env, config=config)
+      self.assertEqual(expected, options.for_global_scope().dict_listy)
+
+    # Appending to the default.
+    check([{'a': 1, 'b': 2}, {'c': 3}], './pants')
+    check([{'a': 1, 'b': 2}, {'c': 3}, {'d': 4, 'e': 5}],
+          './pants --dict-listy=\'{"d": 4, "e": 5}\'')
+    check([{'a': 1, 'b': 2}, {'c': 3}, {'d': 4, 'e': 5}, {'f': 6}],
+          './pants --dict-listy=\'{"d": 4, "e": 5}\' --dict-listy=\'{"f": 6}\'')
+    check([{'a': 1, 'b': 2}, {'c': 3}, {'d': 4, 'e': 5}, {'f': 6}],
+          './pants --dict-listy=\'+[{"d": 4, "e": 5}, {"f": 6}]\'')
+
+    # Replacing the default.
+    check([{'d': 4, 'e': 5}, {'f': 6}],
+          './pants --dict-listy=\'[{"d": 4, "e": 5}, {"f": 6}]\'')
+
+    # Parsing env var correctly.
+    check([{'a': 1, 'b': 2}, {'c': 3}, {'d': 4, 'e': 5}],
+          './pants', env={'PANTS_GLOBAL_DICT_LISTY': '{"d": 4, "e": 5}'})
+    check([{'a': 1, 'b': 2}, {'c': 3}, {'d': 4, 'e': 5}, {'f': 6}],
+          './pants', env={'PANTS_GLOBAL_DICT_LISTY': '+[{"d": 4, "e": 5}, {"f": 6}]'})
+    check([{'d': 4, 'e': 5}, {'f': 6}],
+          './pants', env={'PANTS_GLOBAL_DICT_LISTY': '[{"d": 4, "e": 5}, {"f": 6}]'})
+
+    # Parsing config value correctly.
+    check([{'a': 1, 'b': 2}, {'c': 3}, {'d': 4, 'e': 5}],
+          './pants', config={'GLOBAL': { 'dict_listy': '{"d": 4, "e": 5}'} })
+    check([{'a': 1, 'b': 2}, {'c': 3}, {'d': 4, 'e': 5}, {'f': 6}],
+          './pants', config={'GLOBAL': { 'dict_listy': '+[{"d": 4, "e": 5}, {"f": 6}]'} })
+    check([{'d': 4, 'e': 5}, {'f': 6}],
+          './pants', config={'GLOBAL': { 'dict_listy': '[{"d": 4, "e": 5}, {"f": 6}]'} })
+
+  def test_target_list_option(self):
+    def check(expected, args_str, env=None, config=None):
+      options = self._parse(args_str=args_str, env=env, config=config)
+      self.assertEqual(expected, options.for_global_scope().target_listy)
+
+    # Appending to the default.
+    check(['//:a', '//:b'], './pants')
+    check(['//:a', '//:b', '//:c', '//:d'],
+          './pants --target-listy=//:c --target-listy=//:d')
+    check(['//:a', '//:b', '//:c', '//:d'],
+          './pants --target-listy=\'+["//:c", "//:d"]\'')
+
+    # Replacing the default.
+    check(['//:c', '//:d'],
+          './pants --target-listy=\'["//:c", "//:d"]\'')
+
+    # Parsing env var correctly.
+    check(['//:a', '//:b', '//:c'],
+          './pants', env={'PANTS_GLOBAL_TARGET_LISTY': '//:c'})
+    check(['//:a', '//:b', '//:c', '//:d'],
+          './pants', env={'PANTS_GLOBAL_TARGET_LISTY': '+["//:c", "//:d"]'})
+    check(['//:c', '//:d'],
+          './pants', env={'PANTS_GLOBAL_TARGET_LISTY': '["//:c", "//:d"]'})
+
+    # Parsing config value correctly.
+    check(['//:a', '//:b', '//:c'],
+          './pants', config={'GLOBAL': {'target_listy': '//:c'} })
+    check(['//:a', '//:b', '//:c', '//:d'],
+          './pants', config={'GLOBAL': {'target_listy': '+["//:c", "//:d"]'} })
+    check(['//:c', '//:d'],
+          './pants', config={'GLOBAL': {'target_listy': '["//:c", "//:d"]'} })
+
+  def test_dict_option(self):
+    def check(expected, args_str, env=None, config=None):
+      options = self._parse(args_str=args_str, env=env, config=config)
+      self.assertEqual(expected, options.for_global_scope().dicty)
+
+    check({'a': 'b'}, './pants')
+    check({'c': 'd'}, './pants --dicty=\'{"c": "d"}\'')
+    check({'a': 'b', 'c': 'd'}, './pants --dicty=\'+{"c": "d"}\'')
+
+    check({'c': 'd'}, './pants', config={'GLOBAL': {'dicty': '{"c": "d"}'}})
+    check({'a': 'b', 'c': 'd'}, './pants', config={'GLOBAL': {'dicty': '+{"c": "d"}'}})
+    check({'a': 'b', 'c': 'd', 'e': 'f'}, './pants --dicty=\'+{"e": "f"}\'',
+          config={'GLOBAL': {'dicty': '+{"c": "d"}'}})
+
+    # Check that highest rank wins if we have multiple values for the same key.
+    check({'a': 'b+', 'c': 'd'}, './pants', config={'GLOBAL': {'dicty': '+{"a": "b+", "c": "d"}'}})
+    check({'a': 'b++', 'c': 'd'}, './pants --dicty=\'+{"a": "b++"}\'',
+          config={'GLOBAL': {'dicty': '+{"a": "b+", "c": "d"}'}})
 
   def test_defaults(self):
     # Hard-coded defaults.
@@ -376,12 +542,14 @@ class OptionsTest(unittest.TestCase):
     assertError(NoOptionNames)
     assertError(OptionNameDash, 'badname')
     assertError(OptionNameDoubleDash, '-badname')
-    assertError(InvalidAction, '--foo', action='store_const')
     assertError(InvalidKwarg, '--foo', badkwarg=42)
     assertError(ImplicitValIsNone, '--foo', implicit_value=None)
-    assertError(BooleanOptionType, '--foo', action='store_true', type=int)
-    assertError(BooleanOptionImplicitVal, '--foo', action='store_true', implicit_value=False)
-    assertError(BooleanOptionNameWithNo, '--no-foo', action='store_true')
+    assertError(BooleanOptionNameWithNo, '--no-foo', type=bool)
+    assertError(MemberTypeNotAllowed, '--foo', member_type=int)
+    assertError(MemberTypeNotAllowed, '--foo', type=dict, member_type=int)
+    assertError(InvalidMemberType, '--foo', type=list, member_type=set)
+    assertError(InvalidMemberType, '--foo', type=list, member_type=list)
+    assertError(InvalidMemberType, '--foo', type=list, member_type=list)
 
   def test_frozen_registration(self):
     options = Options.create(args=[], env={}, config=self._create_config({}),
@@ -470,7 +638,7 @@ class OptionsTest(unittest.TestCase):
     self.assertEqual(1, options.for_global_scope().a)
     self.assertEqual(99, options.for_global_scope().b)
     with self.assertRaises(AttributeError):
-      _ = options.for_global_scope().c
+      options.for_global_scope().c
 
     self.assertEqual(1, options.for_scope('compile').a)
     self.assertEqual(2, options.for_scope('compile').b)
@@ -483,13 +651,15 @@ class OptionsTest(unittest.TestCase):
   def test_file_spec_args(self):
     with tempfile.NamedTemporaryFile() as tmp:
       tmp.write(dedent(
-        '''
+        """
         foo
         bar
-        '''
+        """
       ))
       tmp.flush()
-      cmdline = './pants --target-spec-file={filename} compile morx:tgt fleem:tgt'.format(
+      # Note that we prevent loading a real pants.ini during get_bootstrap_options().
+      cmdline = './pants --target-spec-file={filename} --pants-config-files="[]" ' \
+                'compile morx:tgt fleem:tgt'.format(
         filename=tmp.name)
       bootstrapper = OptionsBootstrapper(args=shlex.split(cmdline))
       bootstrap_options = bootstrapper.get_bootstrap_options().for_global_scope()
@@ -512,7 +682,7 @@ class OptionsTest(unittest.TestCase):
       self.assertEqual(expected_val, val)
 
     check_pants_foo('AAA', {
-      'PANTS_DEFAULT_PANTS_FOO': 'AAA',
+      'PANTS_GLOBAL_PANTS_FOO': 'AAA',
       'PANTS_PANTS_FOO': 'BBB',
       'PANTS_FOO': 'CCC',
     })
@@ -538,7 +708,7 @@ class OptionsTest(unittest.TestCase):
       self.assertEqual(expected_val, val)
 
     check_bar_baz('AAA', {
-      'PANTS_DEFAULT_BAR_BAZ': 'AAA',
+      'PANTS_GLOBAL_BAR_BAZ': 'AAA',
       'PANTS_BAR_BAZ': 'BBB',
       'BAR_BAZ': 'CCC',
     })
@@ -585,15 +755,9 @@ class OptionsTest(unittest.TestCase):
     self.assertEqual('BAR', defaulted_only_options.for_global_scope().pants_foo)
 
   def test_deprecated_option_past_removal(self):
-    with self.assertRaises(PastRemovalVersionError):
-      options = Options.create(env={},
-                               config=self._create_config({}),
-                               known_scope_infos=OptionsTest._known_scope_infos,
-                               args='./pants',
-                               option_tracker=OptionTracker())
-      options.register(GLOBAL_SCOPE, '--too-old-option', deprecated_version='0.0.24',
-                       deprecated_hint='The semver for this option has already passed.')
-      options.for_global_scope()
+    """Ensure that expired options raise CodeRemovedError on attempted use."""
+    with self.assertRaises(CodeRemovedError):
+      self._parse('./pants --global-crufty-expired=way2crufty').for_global_scope()
 
   @contextmanager
   def warnings_catcher(self):
@@ -606,7 +770,8 @@ class OptionsTest(unittest.TestCase):
       self.assertEquals(1, len(w))
       self.assertTrue(issubclass(w[-1].category, DeprecationWarning))
       warning_message = str(w[-1].message)
-      self.assertIn('is deprecated and will be removed', warning_message)
+      self.assertIn("will be removed in version",
+                    warning_message)
       self.assertIn(option_string, warning_message)
 
     with self.warnings_catcher() as w:
@@ -674,7 +839,7 @@ class OptionsTest(unittest.TestCase):
                           config={
                             'DEFAULT': {'a': 100},
                             'compile': {'a': 99},
-                            })
+                          })
     self.assertEquals(100, options.for_global_scope().a)
     self.assertEquals(99, options.for_scope('compile').a)
 
@@ -695,14 +860,14 @@ class OptionsTest(unittest.TestCase):
     options = self._parse('./pants compile --a=99',
                           config={
                             'DEFAULT': {'a': 100},
-                            })
+                          })
     self.assertEquals(100, options.for_global_scope().a)
     self.assertEquals(99, options.for_scope('compile').a)
     self.assertEquals(99, options.for_scope('compile.java').a)
 
     # Command line has precedence over environment.
     options = self._parse('./pants compile --a=99',
-                          env={'PANTS_A': 100},)
+                          env={'PANTS_A': 100}, )
     self.assertEquals(100, options.for_global_scope().a)
     self.assertEquals(99, options.for_scope('compile').a)
     self.assertEquals(99, options.for_scope('compile.java').a)
@@ -711,15 +876,15 @@ class OptionsTest(unittest.TestCase):
     options = self._parse('./pants ',
                           config={
                             'DEFAULT': {'a': 100},
-                            },
-                          env={'PANTS_COMPILE_A': 99},)
+                          },
+                          env={'PANTS_COMPILE_A': 99}, )
     self.assertEquals(100, options.for_global_scope().a)
     self.assertEquals(99, options.for_scope('compile').a)
     self.assertEquals(99, options.for_scope('compile.java').a)
 
     # Command line global overrides the middle scope setting in then env.
     options = self._parse('./pants --a=100',
-                          env={'PANTS_COMPILE_A': 99},)
+                          env={'PANTS_COMPILE_A': 99}, )
     self.assertEquals(100, options.for_global_scope().a)
     self.assertEquals(100, options.for_scope('compile').a)
     self.assertEquals(100, options.for_scope('compile.java').a)
@@ -728,7 +893,7 @@ class OptionsTest(unittest.TestCase):
     options = self._parse('./pants --a=100 ',
                           config={
                             'compile': {'a': 99},
-                            })
+                          })
     self.assertEquals(100, options.for_global_scope().a)
     self.assertEquals(100, options.for_scope('compile').a)
     self.assertEquals(100, options.for_scope('compile.java').a)
@@ -737,8 +902,8 @@ class OptionsTest(unittest.TestCase):
     options = self._parse('./pants --a=100 ',
                           config={
                             'compile': {'a': 99},
-                            },
-                          env={'PANTS_A': 100},)
+                          },
+                          env={'PANTS_A': 100}, )
     self.assertEquals(100, options.for_global_scope().a)
     self.assertEquals(100, options.for_scope('compile').a)
     self.assertEquals(100, options.for_scope('compile.java').a)
@@ -763,8 +928,8 @@ class OptionsTest(unittest.TestCase):
 
     pairs = options.get_fingerprintable_for_scope('compile.scala')
     self.assertEquals(len(pairs), 3)
-    self.assertEquals(('', 'blah blah blah'), pairs[0])
-    self.assertEquals(('', True), pairs[1])
+    self.assertEquals((str, 'blah blah blah'), pairs[0])
+    self.assertEquals((bool, True), pairs[1])
     self.assertEquals((int, 77), pairs[2])
 
   def assert_fromfile(self, parse_func, expected_append=None, append_contents=None):
@@ -786,7 +951,7 @@ class OptionsTest(unittest.TestCase):
         )
       }
       """))
-    _do_assert_fromfile(dest='listvalue', expected=['a', 1, 2], contents=dedent("""
+    _do_assert_fromfile(dest='listvalue', expected=['a', '1', '2'], contents=dedent("""
       ['a',
        1,
        2]
@@ -814,12 +979,14 @@ class OptionsTest(unittest.TestCase):
   def test_fromfile_config(self):
     def parse_func(dest, fromfile):
       return self._parse('./pants fromfile', config={'fromfile': {dest: '@{}'.format(fromfile)}})
+
     self.assert_fromfile(parse_func)
 
   def test_fromfile_env(self):
     def parse_func(dest, fromfile):
       return self._parse('./pants fromfile',
                          env={'PANTS_FROMFILE_{}'.format(dest.upper()): '@{}'.format(fromfile)})
+
     self.assert_fromfile(parse_func)
 
   def test_fromfile_error(self):
@@ -844,3 +1011,115 @@ class OptionsTest(unittest.TestCase):
   def test_option_tracker_required(self):
     with self.assertRaises(Options.OptionTrackerRequiredError):
       Options.create(None, None, [])
+
+  def test_pants_global_designdoc_example(self):
+    # The example from the design doc.
+    # Get defaults from config and environment.
+    config = {
+      'GLOBAL': {'b': '99'},
+      'compile': {'a': '88', 'c': '77'},
+    }
+
+    env = {
+      'PANTS_COMPILE_C': '66'
+    }
+
+    options = self._parse('./pants --a=1 compile --b=2 compile.java --a=3 --c=4',
+                          env=env, config=config)
+
+    self.assertEqual(1, options.for_global_scope().a)
+    self.assertEqual(99, options.for_global_scope().b)
+    with self.assertRaises(AttributeError):
+      options.for_global_scope().c
+
+    self.assertEqual(1, options.for_scope('compile').a)
+    self.assertEqual(2, options.for_scope('compile').b)
+    self.assertEqual(66, options.for_scope('compile').c)
+
+    self.assertEqual(3, options.for_scope('compile.java').a)
+    self.assertEqual(2, options.for_scope('compile.java').b)
+    self.assertEqual(4, options.for_scope('compile.java').c)
+
+  def test_pants_global_with_default(self):
+    """
+    This test makes sure values under [DEFAULT] still gets read.
+    """
+    config = {'DEFAULT': {'b': '99'},
+              'GLOBAL': {'store_true_flag': True}
+              }
+    options = self._parse('./pants', config=config)
+
+    self.assertEqual(99, options.for_global_scope().b)
+    self.assertTrue(options.for_global_scope().store_true_flag)
+
+  def test_double_registration(self):
+    options = Options.create(env={},
+                             config=self._create_config({}),
+                             known_scope_infos=OptionsTest._known_scope_infos,
+                             args=shlex.split('./pants'),
+                             option_tracker=OptionTracker())
+    options.register(GLOBAL_SCOPE, '--foo-bar')
+    self.assertRaises(OptionAlreadyRegistered, lambda: options.register(GLOBAL_SCOPE, '--foo-bar'))
+
+  def test_scope_deprecation(self):
+    # Note: This test demonstrates that two different new scopes can deprecate the same
+    # old scope. I.e., it's possible to split an old scope's options among multiple new scopes.
+    class DummyOptionable1(Optionable):
+      options_scope = 'new-scope1'
+      options_scope_category = ScopeInfo.SUBSYSTEM
+      deprecated_options_scope = 'deprecated-scope'
+      deprecated_options_scope_removal_version = '9999.9.9'
+
+    class DummyOptionable2(Optionable):
+      options_scope = 'new-scope2'
+      options_scope_category = ScopeInfo.SUBSYSTEM
+      deprecated_options_scope = 'deprecated-scope'
+      deprecated_options_scope_removal_version = '9999.9.9'
+
+    options = Options.create(env={},
+                             config=self._create_config({
+                               DummyOptionable1.options_scope: {
+                                 'foo': 'xx'
+                               },
+                               DummyOptionable1.deprecated_options_scope: {
+                                 'foo': 'yy',
+                                 'bar': 'zz',
+                                 'baz': 'ww',
+                                 'qux': 'uu'
+                               },
+                             }),
+                             known_scope_infos=[
+                               DummyOptionable1.get_scope_info(),
+                               DummyOptionable2.get_scope_info()
+                             ],
+                             args=shlex.split('./pants --new-scope1-baz=vv'),
+                             option_tracker=OptionTracker())
+
+    options.register(DummyOptionable1.options_scope, '--foo')
+    options.register(DummyOptionable1.options_scope, '--bar')
+    options.register(DummyOptionable1.options_scope, '--baz')
+    options.register(DummyOptionable2.options_scope, '--qux')
+
+    with self.warnings_catcher() as w:
+      vals1 = options.for_scope(DummyOptionable1.options_scope)
+
+    # Check that we got a warning.
+    self.assertEquals(1, len(w))
+    self.assertTrue(isinstance(w[0].message, DeprecationWarning))
+
+    # Check values.
+    # Deprecated scope takes precedence at equal rank.
+    self.assertEquals('yy', vals1.foo)
+    self.assertEquals('zz', vals1.bar)
+    # New scope takes precedence at higher rank.
+    self.assertEquals('vv', vals1.baz)
+
+    with self.warnings_catcher() as w:
+      vals2 = options.for_scope(DummyOptionable2.options_scope)
+
+    # Check that we got a warning.
+    self.assertEquals(1, len(w))
+    self.assertTrue(isinstance(w[0].message, DeprecationWarning))
+
+    # Check values.
+    self.assertEquals('uu', vals2.qux)

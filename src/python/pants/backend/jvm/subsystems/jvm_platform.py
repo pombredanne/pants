@@ -10,7 +10,6 @@ import logging
 from pants.base.exceptions import TaskError
 from pants.base.revision import Revision
 from pants.java.distribution.distribution import DistributionLocator
-from pants.option.custom_types import dict_option
 from pants.subsystem.subsystem import Subsystem
 from pants.util.memo import memoized_method, memoized_property
 
@@ -54,7 +53,7 @@ class JvmPlatform(Subsystem):
   @classmethod
   def register_options(cls, register):
     super(JvmPlatform, cls).register_options(register)
-    register('--platforms', advanced=True, type=dict_option, default={}, fingerprint=True,
+    register('--platforms', advanced=True, type=dict, default={}, fingerprint=True,
              help='Compile settings that can be referred to by name in jvm_targets.')
     register('--default-platform', advanced=True, type=str, default=None, fingerprint=True,
              help='Name of the default platform to use if none are specified.')
@@ -68,6 +67,25 @@ class JvmPlatform(Subsystem):
                                platform.get('target', platform.get('source')),
                                platform.get('args', ()),
                                name=name)
+
+  @classmethod
+  def preferred_jvm_distribution(cls, platforms, strict=False):
+    """Returns a jvm Distribution with a version that should work for all the platforms.
+
+    Any one of those distributions whose version is >= all requested platforms' versions
+    can be returned unless strict flag is set.
+
+    :param iterable platforms: An iterable of platform settings.
+    :param bool strict: If true, only distribution whose version matches the minimum
+      required version can be returned, i.e, the max target_level of all the requested
+      platforms.
+    :returns: Distribution one of the selected distributions.
+    """
+    if not platforms:
+      return DistributionLocator.cached()
+    min_version = max(platform.target_level for platform in platforms)
+    max_version = Revision(*(min_version.components + [9999])) if strict else None
+    return DistributionLocator.cached(minimum_version=min_version, maximum_version=max_version)
 
   @memoized_property
   def platforms_by_name(self):

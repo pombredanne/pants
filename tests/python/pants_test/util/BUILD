@@ -2,10 +2,20 @@
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 python_tests(
+  name = 'argutil',
+  sources = ['test_argutil.py'],
+  coverage = ['pants.util.argutil'],
+  dependencies = [
+    'src/python/pants/util:argutil',
+  ],
+)
+
+python_tests(
   name = 'contextutil',
   sources = ['test_contextutil.py'],
   coverage = ['pants.util.contextutil'],
   dependencies = [
+    '3rdparty/python:mock',
     'src/python/pants/util:contextutil',
   ]
 )
@@ -50,14 +60,6 @@ python_tests(
 )
 
 python_tests(
-  name = 'osutil',
-  sources = ['test_osutil.py'],
-  dependencies = [
-    'src/python/pants/util:osutil',
-  ]
-)
-
-python_tests(
   name = 'memo',
   sources = ['test_memo.py'],
   dependencies = [
@@ -74,28 +76,37 @@ python_tests(
 )
 
 python_tests(
-  name = 'strutil',
-  sources = ['test_strutil.py'],
+  name = 'netrc',
+  sources = ['test_netrc.py'],
   dependencies = [
-    'src/python/pants/util:strutil',
+    '3rdparty/python:mock',
+    'src/python/pants/util:netrc',
   ]
 )
 
 python_tests(
-  name = 'xml_parser',
-  sources = ['test_xml_parser.py'],
+  name = 'osutil',
+  sources = ['test_osutil.py'],
   dependencies = [
-    'src/python/pants/util:xml_parser',
-    'src/python/pants/util:contextutil',
+    'src/python/pants/util:osutil',
   ]
 )
 
 python_tests(
-  name = 'timeout',
-  sources = ['test_timeout.py'],
+  name = 'process_handler',
+  sources = ['test_process_handler.py'],
   dependencies = [
-    'src/python/pants/util:timeout',
-  ],
+    'src/python/pants/util:process_handler'
+  ]
+)
+
+python_tests(
+  name = 'retry',
+  sources = ['test_retry.py'],
+  dependencies = [
+    '3rdparty/python:mock',
+    'src/python/pants/util:retry',
+  ]
 )
 
 python_tests(
@@ -105,5 +116,38 @@ python_tests(
   dependencies = [
     '3rdparty/python:mock',
     'src/python/pants/util:socket',
-  ],
+  ]
+)
+
+python_tests(
+  name = 'strutil',
+  sources = ['test_strutil.py'],
+  dependencies = [
+    'src/python/pants/util:strutil',
+  ]
+)
+
+python_tests(
+  name = 'timeout',
+  sources = ['test_timeout.py'],
+  dependencies = [
+    'src/python/pants/util:timeout',
+  ]
+)
+
+python_library(
+  name='xml_test_base',
+  sources = ['xml_test_base.py'],
+  dependencies = [
+    'src/python/pants/util:contextutil',
+  ]
+)
+
+python_tests(
+  name = 'xml_parser',
+  sources = ['test_xml_parser.py'],
+  dependencies = [
+    'src/python/pants/util:xml_parser',
+    'tests/python/pants_test/util:xml_test_base',
+  ]
 )

@@ -24,16 +24,17 @@ class PluginNotFound(PluginLoadingError): pass
 class PluginLoadOrderError(PluginLoadingError): pass
 
 
-def load_plugins_and_backends(plugins, working_set, backends):
+def load_backends_and_plugins(plugins, working_set, backends, build_configuration=None):
   """Load named plugins and source backends
 
-  :param list<str> plugins: Plugins to load (see `load_plugins`).
+  :param list<str> plugins: Plugins to load (see `load_plugins`).  Plugins are loaded after
+    backends.
   :param WorkingSet working_set: A pkg_resources.WorkingSet to load plugins from.
   :param list<str> backends: Source backends to load (see `load_build_configuration_from_source`).
   """
-  build_configuration = BuildConfiguration()
+  build_configuration = build_configuration or BuildConfiguration()
+  load_build_configuration_from_source(build_configuration, backends)
   load_plugins(build_configuration, plugins or [], working_set)
-  load_build_configuration_from_source(build_configuration, additional_backends=backends or [])
   return build_configuration
 
 
@@ -92,28 +93,19 @@ def load_plugins(build_configuration, plugins, working_set):
     loaded[dist.as_requirement().key] = dist
 
 
-def load_build_configuration_from_source(build_configuration, additional_backends=None):
-  """Installs pants backend packages to provide targets and helper functions to BUILD files and
-  goals to the cli.
+def load_build_configuration_from_source(build_configuration, backends=None):
+  """Installs pants backend packages to provide BUILD file symbols and cli goals.
 
   :param BuildConfiguration build_configuration: The BuildConfiguration (for adding aliases).
-  :param additional_backends: An optional list of additional packages to load backends from.
+  :param backends: An optional list of additional packages to load backends from.
   :raises: :class:``pants.base.exceptions.BuildConfigurationError`` if there is a problem loading
     the build configuration.
   """
-  # Note: pants.core_tasks must be first in this list, as it registers various stubs
-  # that other tasks can use for scheduling against.
-  # TODO: Allow repos to opt in to any backend (but not to core_tasks, which must always
-  # be loaded).
-  backend_packages = ['pants.core_tasks',
-                      'pants.backend.authentication',
-                      'pants.backend.core',
-                      'pants.backend.python',
-                      'pants.backend.jvm',
-                      'pants.backend.codegen',
-                      'pants.backend.project_info']
-
-  for backend_package in OrderedSet(backend_packages + (additional_backends or [])):
+  # pants.build_graph and pants.core_task must always be loaded, and before any other backends.
+  # TODO: Consider replacing the "backend" nomenclature here. pants.build_graph and
+  # pants.core_tasks aren't really backends.
+  backend_packages = OrderedSet(['pants.build_graph', 'pants.core_tasks'] + (backends or []))
+  for backend_package in backend_packages:
     load_backend(build_configuration, backend_package)
 
 

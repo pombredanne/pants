@@ -16,11 +16,18 @@ from pants_test.pants_run_integration_test import PantsRunIntegrationTest
 
 
 class BaseCompileIT(PantsRunIntegrationTest):
+  """
+  :API: public
+  """
+
+  _EXTRA_TASK_ARGS=[]
 
   @contextmanager
-  def do_test_compile(self, target,
-      expected_files=None, iterations=2, expect_failure=False, extra_args=None, workdir_outside_of_buildroot=False):
+  def do_test_compile(self, target, expected_files=None, iterations=2, expect_failure=False,
+                      extra_args=None, workdir_outside_of_buildroot=False):
     """Runs a configurable number of iterations of compilation for the given target.
+
+    :API: public
 
     By default, runs twice to shake out errors related to noops.
     """
@@ -56,10 +63,13 @@ class BaseCompileIT(PantsRunIntegrationTest):
         yield found
 
   def run_test_compile(self, workdir, cachedir, target, clean_all=False, extra_args=None):
+    """
+    :API: public
+    """
     global_args = [
         '--cache-write',
         '--cache-write-to=[\'{}\']'.format(cachedir),
-    ]
+    ] + self._EXTRA_TASK_ARGS
     args = ['compile', target] + (extra_args if extra_args else [])
     # Clean-all on the first iteration.
     if clean_all:
@@ -72,7 +82,10 @@ class BaseCompileIT(PantsRunIntegrationTest):
     return files.pop()
 
   def do_test_success_and_failure(self, target, success_args, failure_args, shared_args=None):
-    """Ensure that a target fails to build when one arg set is passed, and succeeds for another."""
+    """Ensure that a target fails to build when one arg set is passed, and succeeds for another.
+
+    :API: public
+    """
     shared_args = shared_args if shared_args else []
 
     # Check that success_args succeed.

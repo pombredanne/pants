@@ -6,6 +6,7 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
                         unicode_literals, with_statement)
 
 import os
+import shutil
 import tempfile
 from abc import abstractmethod
 from contextlib import contextmanager
@@ -14,16 +15,17 @@ import six
 from six import binary_type, string_types
 from twitter.common.collections import maybe_list
 
+from pants.backend.jvm.argfile import safe_args
 from pants.backend.jvm.subsystems.jar_tool import JarTool
 from pants.backend.jvm.targets.java_agent import JavaAgent
 from pants.backend.jvm.targets.jvm_binary import Duplicate, JarRules, JvmBinary, Skip
 from pants.backend.jvm.tasks.classpath_util import ClasspathUtil
 from pants.backend.jvm.tasks.nailgun_task import NailgunTask
 from pants.base.exceptions import TaskError
-from pants.binaries.binary_util import safe_args
 from pants.java.jar.manifest import Manifest
 from pants.java.util import relativize_classpath
 from pants.util.contextutil import temporary_dir
+from pants.util.dirutil import safe_mkdtemp
 from pants.util.meta import AbstractClass
 
 
@@ -33,6 +35,8 @@ class Jar(object):
   Upon construction the jar is conceptually opened for writes.  The write methods are called to
   add to the jar's contents and then changes are finalized with a call to close.  If close is not
   called the staged changes will be lost.
+
+  :API: public
   """
 
   class Error(Exception):
@@ -48,6 +52,20 @@ class Jar(object):
     def dest(self):
       """The destination path of the entry in the jar."""
       return self._dest
+
+    def split_manifest(self):
+      """Splits this entry into a jar non-manifest part and a manifest part.
+
+      Some entries represent a manifest, some do not, and others have both a manifest entry and
+      non-manifest entries; as such, callers must be prepared to handle ``None`` entries.
+
+      :returns: A tuple of (non-manifest Entry, manifest Entry).
+      :rtype: tuple of (:class:`Jar.Entry`, :class:`Jar.Entry`)
+      """
+      if self.dest == Manifest.PATH:
+        return None, self
+      else:
+        return self, None
 
     @abstractmethod
     def materialize(self, scratch_dir):
@@ -65,6 +83,26 @@ class Jar(object):
     def __init__(self, src, dest=None):
       super(Jar.FileSystemEntry, self).__init__(dest)
       self._src = src
+
+    def split_manifest(self):
+      if not os.path.isdir(self._src):
+        return super(Jar.FileSystemEntry, self).split_manifest()
+
+      if self.dest and self.dest == os.path.commonprefix([self.dest, Manifest.PATH]):
+        manifest_relpath = os.path.relpath(Manifest.PATH, self.dest)
+      else:
+        manifest_relpath = Manifest.PATH
+
+      manifest_path = os.path.join(self._src, manifest_relpath)
+      if os.path.isfile(manifest_path):
+        manifest_entry = Jar.FileSystemEntry(manifest_path, dest=Manifest.PATH)
+
+        non_manifest_chroot = os.path.join(safe_mkdtemp(), 'chroot')
+        shutil.copytree(self._src, non_manifest_chroot)
+        os.unlink(os.path.join(non_manifest_chroot, manifest_relpath))
+        return Jar.FileSystemEntry(non_manifest_chroot), manifest_entry
+      else:
+        return self, None
 
     def materialize(self, _):
       return self._src
@@ -158,10 +196,11 @@ class Jar(object):
     self._add_entry(self.MemoryEntry(path, contents))
 
   def _add_entry(self, entry):
-    if Manifest.PATH == entry.dest:
-      self._manifest_entry = entry
-    else:
-      self._entries.append(entry)
+    non_manifest, manifest = entry.split_manifest()
+    if manifest:
+      self._manifest_entry = manifest
+    if non_manifest:
+      self._entries.append(non_manifest)
 
   def writejar(self, jar):
     """Schedules all entries from the given ``jar``'s to be added to this jar save for the manifest.
@@ -235,6 +274,8 @@ class JarTask(NailgunTask):
 
   All subclasses will share the same underlying nailgunned jar tool and thus benefit from fast
   invocations.
+
+  :API: public
   """
 
   @classmethod
@@ -274,6 +315,8 @@ class JarTask(NailgunTask):
   @contextmanager
   def open_jar(self, path, overwrite=False, compressed=True, jar_rules=None):
     """Yields a Jar that will be written when the context exits.
+
+    :API: public
 
     :param string path: the path to the jar file
     :param bool overwrite: overwrite the file at ``path`` if it exists; ``False`` by default; ie:
@@ -322,7 +365,10 @@ class JarTask(NailgunTask):
 class JarBuilderTask(JarTask):
 
   class JarBuilder(AbstractClass):
-    """A utility to aid in adding the classes and resources associated with targets to a jar."""
+    """A utility to aid in adding the classes and resources associated with targets to a jar.
+
+    :API: public
+    """
 
     @staticmethod
     def _add_agent_manifest(agent, manifest):
@@ -366,15 +412,12 @@ class JarBuilderTask(JarTask):
       self._jar = jar
       self._manifest = Manifest()
 
-    def add_target(self, target, recursive=False, canonical_classpath_base_dir=None):
+    def add_target(self, target, recursive=False):
       """Adds the classes and resources for a target to an open jar.
 
       :param target: The target to add generated classes and resources for.
       :param bool recursive: `True` to add classes and resources for the target's transitive
         internal dependency closure.
-      :param string canonical_classpath_base_dir: If set, instead of adding targets to the jar
-        bundle, create canonical symlinks to the original classpath and save canonical symlinks
-        to Manifest's Class-Path.
       :returns: `True` if the target contributed any files - manifest entries, classfiles or
         resource files - to this jar.
       :rtype: bool
@@ -410,28 +453,19 @@ class JarBuilderTask(JarTask):
       if not recursive and target.has_resources:
         targets += target.resources
       # We only gather internal classpath elements per our contract.
-      if canonical_classpath_base_dir:
-        canonical_classpath = ClasspathUtil.create_canonical_classpath(
-          classpath_products,
-          targets,
-          canonical_classpath_base_dir
-        )
-        self._jar.append_classpath(canonical_classpath)
-        products_added = True
-      else:
-        target_classpath = ClasspathUtil.internal_classpath(targets,
-                                                            classpath_products)
-        for entry in target_classpath:
-          if ClasspathUtil.is_jar(entry):
-            self._jar.writejar(entry)
+      target_classpath = ClasspathUtil.internal_classpath(targets,
+                                                          classpath_products)
+      for entry in target_classpath:
+        if ClasspathUtil.is_jar(entry):
+          self._jar.writejar(entry)
+          products_added = True
+        elif ClasspathUtil.is_dir(entry):
+          for rel_file in ClasspathUtil.classpath_entries_contents([entry]):
+            self._jar.write(os.path.join(entry, rel_file), rel_file)
             products_added = True
-          elif ClasspathUtil.is_dir(entry):
-            for rel_file in ClasspathUtil.classpath_entries_contents([entry]):
-              self._jar.write(os.path.join(entry, rel_file), rel_file)
-              products_added = True
-          else:
-            # non-jar and non-directory classpath entries should be ignored
-            pass
+        else:
+          # non-jar and non-directory classpath entries should be ignored
+          pass
 
       return products_added
 

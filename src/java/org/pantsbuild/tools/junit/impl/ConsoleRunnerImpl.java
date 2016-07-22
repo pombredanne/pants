@@ -3,6 +3,17 @@
 
 package org.pantsbuild.tools.junit.impl;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Charsets;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Lists;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
+import com.google.common.io.Closeables;
+import com.google.common.io.Files;
+import java.io.BufferedOutputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
@@ -10,64 +21,44 @@ import java.io.FilterOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.io.PrintStream;
-import java.io.ByteArrayOutputStream;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.Comparator;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
-
-import com.google.common.base.Charsets;
-import com.google.common.base.Preconditions;
-import com.google.common.base.Predicate;
-import com.google.common.collect.Iterables;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
-import com.google.common.io.Closeables;
-import com.google.common.io.Files;
-
 import org.apache.commons.io.output.TeeOutputStream;
 import org.junit.runner.Computer;
 import org.junit.runner.Description;
 import org.junit.runner.JUnitCore;
 import org.junit.runner.Request;
 import org.junit.runner.Result;
-import org.junit.runner.RunWith;
 import org.junit.runner.Runner;
 import org.junit.runner.manipulation.Filter;
 import org.junit.runner.notification.Failure;
+import org.junit.runner.notification.RunListener;
+import org.junit.runner.notification.RunNotifier;
 import org.junit.runners.model.InitializationError;
 import org.kohsuke.args4j.Argument;
 import org.kohsuke.args4j.CmdLineException;
 import org.kohsuke.args4j.CmdLineParser;
 import org.kohsuke.args4j.Option;
 import org.kohsuke.args4j.spi.StringArrayOptionHandler;
-
 import org.pantsbuild.args4j.InvalidCmdLineArgumentException;
+import org.pantsbuild.junit.annotations.TestParallel;
+import org.pantsbuild.junit.annotations.TestSerial;
+import org.pantsbuild.tools.junit.impl.experimental.ConcurrentComputer;
 import org.pantsbuild.tools.junit.withretry.AllDefaultPossibilitiesBuilderWithRetry;
 
 /**
  * An alternative to {@link JUnitCore} with stream capture and junit-report xml output capabilities.
  */
 public class ConsoleRunnerImpl {
-  private static final SwappableStream<PrintStream> SWAPPABLE_OUT =
-      new SwappableStream<PrintStream>(System.out);
-
-  private static final SwappableStream<PrintStream> SWAPPABLE_ERR =
-      new SwappableStream<PrintStream>(System.err);
-
   /** Should be set to false for unit testing via {@link #setCallSystemExitOnFinish} */
   private static boolean callSystemExitOnFinish = true;
   /** Intended to be used in unit testing this class */
-  private static int exitStatus;
+  private static RunListener testListener = null;
 
   /**
    * A stream that allows its underlying output to be swapped.
@@ -211,16 +202,22 @@ public class ConsoleRunnerImpl {
    * A run listener that suiteCaptures the output and error streams for each test class
    * and makes the content of these available.
    */
-  static class StreamCapturingListener extends ForwardingListener implements StreamSource {
+  static class StreamCapturingListener extends RunListener implements StreamSource {
     private final Map<Class<?>, StreamCapture> suiteCaptures = Maps.newHashMap();
     private final Map<Description, InMemoryStreamCapture> caseCaptures = Maps.newHashMap();
 
     private final File outdir;
     private final OutputMode outputMode;
+    private final SwappableStream<PrintStream> swappableOut;
+    private final SwappableStream<PrintStream> swappableErr;
 
-    StreamCapturingListener(File outdir, OutputMode outputMode) {
+    StreamCapturingListener(File outdir, OutputMode outputMode,
+        SwappableStream<PrintStream> swappableOut,
+        SwappableStream<PrintStream> swappableErr) {
       this.outdir = outdir;
       this.outputMode = outputMode;
+      this.swappableOut = swappableOut;
+      this.swappableErr = swappableErr;
     }
 
     @Override
@@ -267,18 +264,18 @@ public class ConsoleRunnerImpl {
 
       switch (outputMode) {
         case ALL:
-          SWAPPABLE_OUT.swap(new TeeOutputStream(SWAPPABLE_OUT.getOriginal(), suiteOut));
-          SWAPPABLE_ERR.swap(new TeeOutputStream(SWAPPABLE_ERR.getOriginal(), suiteErr));
+          swappableOut.swap(new TeeOutputStream(swappableOut.getOriginal(), suiteOut));
+          swappableErr.swap(new TeeOutputStream(swappableErr.getOriginal(), suiteErr));
           break;
         case FAILURE_ONLY:
           InMemoryStreamCapture caseCapture = new InMemoryStreamCapture();
           caseCaptures.put(description, caseCapture);
-          SWAPPABLE_OUT.swap(new TeeOutputStream(caseCapture.getOutputStream(), suiteOut));
-          SWAPPABLE_ERR.swap(new TeeOutputStream(caseCapture.getErrorStream(), suiteErr));
+          swappableOut.swap(new TeeOutputStream(caseCapture.getOutputStream(), suiteOut));
+          swappableErr.swap(new TeeOutputStream(caseCapture.getErrorStream(), suiteErr));
           break;
         case NONE:
-          SWAPPABLE_OUT.swap(suiteOut);
-          SWAPPABLE_ERR.swap(suiteErr);
+          swappableOut.swap(suiteOut);
+          swappableErr.swap(suiteErr);
           break;
         default:
           throw new IllegalStateException();
@@ -290,10 +287,15 @@ public class ConsoleRunnerImpl {
     @Override
     public void testFailure(Failure failure) throws Exception {
       if (outputMode == OutputMode.FAILURE_ONLY) {
-        InMemoryStreamCapture capture = caseCaptures.remove(failure.getDescription());
-        capture.close();
-        SWAPPABLE_OUT.getOriginal().append(new String(capture.readOut()));
-        SWAPPABLE_ERR.getOriginal().append(new String(capture.readErr()));
+        if (caseCaptures.containsKey(failure.getDescription())) {
+          InMemoryStreamCapture capture = caseCaptures.remove(failure.getDescription());
+          capture.close();
+          swappableOut.getOriginal().append(new String(capture.readOut()));
+          swappableErr.getOriginal().append(new String(capture.readErr()));
+        } else {
+          // Do nothing.
+          // In case of exception in @BeforeClass method testFailure executes without testStarted.
+        }
       }
       super.testFailure(failure);
     }
@@ -318,22 +320,64 @@ public class ConsoleRunnerImpl {
     }
   }
 
+  /**
+   * A run listener that will stop the test run after the first test failure.
+   */
+  public class FailFastListener extends RunListener {
+    private final RunNotifier runNotifier;
+    private final Result result = new Result();
+
+    public FailFastListener(RunNotifier runNotifier) {
+      this.runNotifier = runNotifier;
+      this.runNotifier.addListener(result.createListener());
+    }
+
+    @Override
+    public void testFailure(Failure failure) throws Exception {
+      runNotifier.fireTestFinished(failure.getDescription());
+      runNotifier.fireTestRunFinished(result);
+      runNotifier.pleaseStop();
+    }
+  }
+
+  /**
+   * A runner that wraps the original test runner so we can add a listener
+   * to stop the tests after the first test failure.
+   */
+  public class FailFastRunner extends Runner {
+    private final Runner wrappedRunner;
+
+    public FailFastRunner(Runner wrappedRunner) {
+      this.wrappedRunner = wrappedRunner;
+    }
+
+    @Override public Description getDescription() {
+      return wrappedRunner.getDescription();
+    }
+
+    @Override public void run(RunNotifier notifier) {
+      notifier.addListener(new FailFastListener(notifier));
+      wrappedRunner.run(notifier);
+    }
+  }
+
   enum OutputMode {
     ALL, FAILURE_ONLY, NONE
   }
-
-  private static final Pattern METHOD_PARSER = Pattern.compile("^([^#]+)#([^#]+)$");
 
   private final boolean failFast;
   private final OutputMode outputMode;
   private final boolean xmlReport;
   private final File outdir;
   private final boolean perTestTimer;
-  private final boolean defaultParallel;
+  private final Concurrency defaultConcurrency;
   private final int parallelThreads;
   private final int testShard;
   private final int numTestShards;
   private final int numRetries;
+  private final boolean useExperimentalRunner;
+  private final SwappableStream<PrintStream> swappableOut;
+  private final SwappableStream<PrintStream> swappableErr;
 
   ConsoleRunnerImpl(
       boolean failFast,
@@ -341,175 +385,208 @@ public class ConsoleRunnerImpl {
       boolean xmlReport,
       boolean perTestTimer,
       File outdir,
-      boolean defaultParallel,
+      Concurrency defaultConcurrency,
       int parallelThreads,
       int testShard,
       int numTestShards,
-      int numRetries) {
+      int numRetries,
+      boolean useExperimentalRunner,
+      PrintStream out,
+      PrintStream err) {
+
+    Preconditions.checkNotNull(outputMode);
+    Preconditions.checkNotNull(defaultConcurrency);
+    Preconditions.checkNotNull(out);
+    Preconditions.checkNotNull(err);
 
     this.failFast = failFast;
     this.outputMode = outputMode;
     this.xmlReport = xmlReport;
     this.perTestTimer = perTestTimer;
     this.outdir = outdir;
-    this.defaultParallel = defaultParallel;
+    this.defaultConcurrency = defaultConcurrency;
     this.parallelThreads = parallelThreads;
     this.testShard = testShard;
     this.numTestShards = numTestShards;
     this.numRetries = numRetries;
+    this.swappableOut = new SwappableStream<PrintStream>(out);
+    this.swappableErr = new SwappableStream<PrintStream>(err);
+    this.useExperimentalRunner = useExperimentalRunner;
   }
 
-  void run(Iterable<String> tests) {
-    System.setOut(new PrintStream(SWAPPABLE_OUT));
-    System.setErr(new PrintStream(SWAPPABLE_ERR));
+  void run(Collection<String> tests) {
+    System.setOut(new PrintStream(swappableOut));
+    System.setErr(new PrintStream(swappableErr));
 
+    JUnitCore core = new JUnitCore();
+
+    if (testListener != null) {
+      core.addListener(testListener);
+    }
+
+    if (!outdir.exists() && !outdir.mkdirs()) {
+      throw new IllegalStateException("Failed to create output directory: " + outdir);
+    }
+
+    StreamCapturingListener streamCapturingListener =
+        new StreamCapturingListener(outdir, outputMode, swappableOut, swappableErr);
+    core.addListener(streamCapturingListener);
+
+    if (xmlReport) {
+      core.addListener(new AntJunitXmlReportListener(outdir, streamCapturingListener));
+    }
+
+    if (perTestTimer) {
+      core.addListener(new PerTestConsoleListener(swappableOut.getOriginal()));
+    } else {
+      core.addListener(new ConsoleListener(swappableOut.getOriginal()));
+    }
+
+    ShutdownListener shutdownListener = new ShutdownListener(swappableOut.getOriginal());
+    core.addListener(shutdownListener);
+    // Wrap test execution with registration of a shutdown hook that will ensure we
+    // never exit silently if the VM does.
+    final Thread unexpectedExitHook =
+        createUnexpectedExitHook(shutdownListener, swappableOut.getOriginal());
+    Runtime.getRuntime().addShutdownHook(unexpectedExitHook);
+
+    int failures = 0;
+    try {
+      List<Spec> parsedTests = new SpecParser(tests).parse();
+
+      if (useExperimentalRunner) {
+        failures = runExperimental(parsedTests, core);
+      } else {
+        failures = runLegacy(parsedTests, core);
+      }
+    } catch (SpecException e) {
+      failures = 1;
+      swappableErr.getOriginal().println("Error parsing specs: " + e.getMessage());
+    } catch (InitializationError e) {
+      failures = 1;
+      swappableErr.getOriginal().println("Error initializing JUnit: " + e.getMessage());
+    } finally {
+      // If we're exiting via a thrown exception, we'll get a better message by letting it
+      // propagate than by halt()ing.
+      Runtime.getRuntime().removeShutdownHook(unexpectedExitHook);
+    }
+    exit(failures);
+  }
+
+  /**
+   * Returns a thread that records a system exit to the listener, and then halts(1).
+   */
+  private Thread createUnexpectedExitHook(final ShutdownListener listener, final PrintStream out) {
+    return new Thread() {
+      @Override public void run() {
+        try {
+          listener.unexpectedShutdown();
+          // We want to trap and log no matter why abort failed for a better end user message.
+        } catch (Exception e) {
+          out.println(e);
+          e.printStackTrace(out);
+        }
+        // This error might be a call to `System.exit(0)` in a test, which we definitely do
+        // not want to go unnoticed.
+        out.println("FATAL: VM exiting unexpectedly.");
+        out.flush();
+        Runtime.getRuntime().halt(1);
+      }
+    };
+  }
+
+  private int runExperimental(List<Spec> parsedTests, JUnitCore core)
+      throws InitializationError {
+    Preconditions.checkNotNull(core);
+
+    int failures = 0;
+    SpecSet filter = new SpecSet(parsedTests, defaultConcurrency);
+
+    // TODO(zundel): Test sharding currently isn't compatible with the parallel computer runner
+    // since the Computer only accepts Class objects.
+    if (numTestShards == 0) {
+      // Run all of the parallel tests using the ConcurrentComputer
+      // NB(zundel): This runs these test of each concurrency setting together and waits for them
+      // to finish.  This introduces a bottleneck after each class of test.
+      failures += runConcurrentTests(core, filter, Concurrency.PARALLEL_CLASSES_AND_METHODS);
+      failures += runConcurrentTests(core, filter, Concurrency.PARALLEL_CLASSES);
+      failures += runConcurrentTests(core, filter, Concurrency.PARALLEL_METHODS);
+    }
+
+    // Everything else has to run serially or with the legacy runner
+    // TODO(zundel): Attempt to refactor so we can dump runLegacy all together.
+    List<Spec> legacySpecs = ImmutableList.copyOf(filter.specs());
+    failures += runLegacy(legacySpecs, core);
+
+    return failures;
+  }
+
+  private int runConcurrentTests(JUnitCore core, SpecSet specSet, Concurrency concurrency) {
+    Computer junitComputer = new ConcurrentComputer(concurrency, parallelThreads);
+    Class<?>[] classes = specSet.extract(concurrency).classes();
+    return core.run(junitComputer, classes).getFailureCount();
+  }
+
+  private int runLegacy(List<Spec> parsedTests, JUnitCore core) throws InitializationError {
     List<Request> requests =
-        parseRequests(SWAPPABLE_OUT.getOriginal(), SWAPPABLE_ERR.getOriginal(), tests);
+        legacyParseRequests(swappableOut.getOriginal(), swappableErr.getOriginal(), parsedTests);
 
     if (numTestShards > 0) {
       requests = setFilterForTestShard(requests);
     }
 
-    JUnitCore core = new JUnitCore();
-    final AbortableListener abortableListener = new AbortableListener(failFast) {
-      @Override protected void abort(Result failureResult) {
-        exit(failureResult.getFailureCount());
-      }
-    };
-    core.addListener(abortableListener);
-
-    if (xmlReport) {
-      if (!outdir.exists()) {
-        if (!outdir.mkdirs()) {
-          throw new IllegalStateException("Failed to create output directory: " + outdir);
-        }
-      }
-      StreamCapturingListener streamCapturingListener =
-        new StreamCapturingListener(outdir, outputMode);
-      abortableListener.addListener(streamCapturingListener);
-
-      AntJunitXmlReportListener xmlReportListener =
-          new AntJunitXmlReportListener(outdir, streamCapturingListener);
-      abortableListener.addListener(xmlReportListener);
-    }
-
-    // TODO: Register all listeners to core instead of to abortableListener because
-    // abortableListener gets removed when one of the listener throws exceptions in
-    // RunNotifier.java. Other listeners should not get removed.
-    if (perTestTimer) {
-      abortableListener.addListener(new PerTestConsoleListener(SWAPPABLE_OUT.getOriginal()));
-    } else {
-      core.addListener(new ConsoleListener(SWAPPABLE_OUT.getOriginal()));
-    }
-
-    // Wrap test execution with registration of a shutdown hook that will ensure we
-    // never exit silently if the VM does.
-    final Thread abnormalExitHook =
-        createAbnormalExitHook(abortableListener, SWAPPABLE_OUT.getOriginal());
-    Runtime.getRuntime().addShutdownHook(abnormalExitHook);
-    int failures = 0;
-    try {
-      if (this.parallelThreads > 1) {
-        ConcurrentCompositeRequest request = new ConcurrentCompositeRequest(
-            requests, this.defaultParallel, this.parallelThreads);
-        failures = core.run(request).getFailureCount();
+    if (this.parallelThreads > 1) {
+      ConcurrentCompositeRequestRunner concurrentRunner = new ConcurrentCompositeRequestRunner(
+          requests, this.defaultConcurrency, this.parallelThreads);
+      if (failFast) {
+        return core.run(new FailFastRunner(concurrentRunner)).getFailureCount();
       } else {
-        for (Request request : requests) {
-          Result result = core.run(request);
-          failures += result.getFailureCount();
-        }
-      }
-    } catch (InitializationError initializationError) {
-      failures = 1;
-    } finally {
-      // If we're exiting via a thrown exception, we'll get a better message by letting it
-      // propagate than by halt()ing.
-      Runtime.getRuntime().removeShutdownHook(abnormalExitHook);
-    }
-    exit(failures);
-  }
-
-
-  /**
-   * Returns a thread that records a system exit to the listener, and then halts(1).
-   */
-  private Thread createAbnormalExitHook(final AbortableListener listener, final PrintStream out) {
-    Thread abnormalExitHook = new Thread() {
-      @Override public void run() {
-        try {
-          listener.abort(new UnknownError("Abnormal VM exit - test crashed."));
-        // We want to trap and log no matter why abort failed for a better end user message.
-        // SUPPRESS CHECKSTYLE RegexpSinglelineJava
-        } catch (Exception e) {
-          out.println(e);
-          e.printStackTrace(out);
-        }
-        // This error might be a call to `System.exit(0)`, which we definitely do
-        // not want to go unnoticed.
-        out.println("FATAL: VM exiting uncleanly.");
-        out.flush();
-        Runtime.getRuntime().halt(1);
-      }
-    };
-    return abnormalExitHook;
-  }
-
-  private List<Request> parseRequests(PrintStream out, PrintStream err, Iterable<String> specs) {
-    /**
-     * Datatype representing an individual test method.
-     */
-    class TestMethod {
-      private final Class<?> clazz;
-      private final String name;
-      TestMethod(Class<?> clazz, String name) {
-        this.clazz = clazz;
-        this.name = name;
+        return core.run(concurrentRunner).getFailureCount();
       }
     }
+
+    int failures = 0;
+    Result result;
+    for (Request request : requests) {
+      if (failFast) {
+        result = core.run(new FailFastRunner(request.getRunner()));
+      } else {
+        result = core.run(request);
+      }
+      failures += result.getFailureCount();
+    }
+    return failures;
+  }
+
+  private List<Request> legacyParseRequests(PrintStream out, PrintStream err,
+      List<Spec> specs) {
+
     Set<TestMethod> testMethods = Sets.newLinkedHashSet();
     Set<Class<?>> classes = Sets.newLinkedHashSet();
-    for (String spec : specs) {
-      Matcher matcher = METHOD_PARSER.matcher(spec);
-      try {
-        if (matcher.matches()) {
-          Class<?> testClass = loadClass(matcher.group(1));
-          if (isTest(testClass)) {
-            String method = matcher.group(2);
-            testMethods.add(new TestMethod(testClass, method));
-          }
-        } else {
-          Class<?> testClass = loadClass(spec);
-          if (isTest(testClass)) {
-            classes.add(testClass);
-          }
+    for (Spec spec: specs) {
+      if (spec.getMethods().isEmpty()) {
+        classes.add(spec.getSpecClass());
+      } else {
+        for (String method : spec.getMethods()) {
+          testMethods.add(new TestMethod(spec.getSpecClass(), method));
         }
-      } catch (NoClassDefFoundError e) {
-        notFoundError(spec, out, e);
-      } catch (ClassNotFoundException e) {
-        notFoundError(spec, out, e);
-      } catch (LinkageError e) {
-        // Any of a number of runtime linking errors can occur when trying to load a class,
-        // fail with the test spec so the class failing to link is known.
-        notFoundError(spec, out, e);
-      // See the comment below for justification.
-      // SUPPRESS CHECKSTYLE RegexpSinglelineJava
-      } catch (RuntimeException e) {
-        // The class may fail with some variant of RTE in its static initializers, trap these
-        // and dump the bad spec in question to help narrow down issue.
-        notFoundError(spec, out, e);
       }
     }
-    List<Request> requests = Lists.newArrayList();
 
+    List<Request> requests = Lists.newArrayList();
     if (!classes.isEmpty()) {
       if (this.perTestTimer || this.parallelThreads > 1) {
         for (Class<?> clazz : classes) {
-          requests.add(new AnnotatedClassRequest(clazz, numRetries, err));
+          if (legacyShouldRunParallelMethods(clazz)) {
+            testMethods.addAll(TestMethod.fromClass(clazz));
+          } else {
+            requests.add(new AnnotatedClassRequest(clazz, numRetries, err));
+          }
         }
       } else {
         // The code below does what the original call
         // requests.add(Request.classes(classes.toArray(new Class<?>[classes.size()])));
-        // does, except that it instantiates our own builder, needed to support retries
+        // does, except that it instantiates our own builder, needed to support retries.
         try {
           AllDefaultPossibilitiesBuilderWithRetry builder =
               new AllDefaultPossibilitiesBuilderWithRetry(numRetries, err);
@@ -529,10 +606,24 @@ public class ConsoleRunnerImpl {
     return requests;
   }
 
-  // Loads classes without initializing them.  We just need the type, annotations and method
-  // signatures, none of which requires initialization.
-  private Class<?> loadClass(String name) throws ClassNotFoundException {
-    return Class.forName(name, /* initialize = */ false, getClass().getClassLoader());
+  private boolean legacyShouldRunParallelMethods(Class<?> clazz) {
+    if (!Util.isRunnable(clazz)) {
+      return false;
+    }
+    // The legacy runner makes Requests out of each individual method in a class. This isn't
+    // designed to work for JUnit3 and isn't appropriate for custom runners.
+    if (Util.isJunit3Test(clazz) || Util.isUsingCustomRunner(clazz)) {
+      return false;
+    }
+
+    // TestSerial and TestParallel take precedence over the default concurrency command
+    // line parameter
+    if (clazz.isAnnotationPresent(TestSerial.class)
+        || clazz.isAnnotationPresent(TestParallel.class)) {
+      return false;
+    }
+
+    return this.defaultConcurrency.shouldRunMethodsParallel();
   }
 
   /**
@@ -547,7 +638,7 @@ public class ConsoleRunnerImpl {
     // order), and save it in testToRunStatus table.
     class TestFilter extends Filter {
       private int testIdx;
-      private HashMap<String, Boolean> testToRunStatus = new HashMap<String, Boolean>();
+      private Map<String, Boolean> testToRunStatus = Maps.newHashMap();
 
       @Override
       public boolean shouldRun(Description desc) {
@@ -586,20 +677,15 @@ public class ConsoleRunnerImpl {
     TestFilter testFilter = new TestFilter();
     AlphabeticComparator alphaComp = new AlphabeticComparator();
     ArrayList<Request> filteredRequests = new ArrayList<Request>(requests.size());
-    for (Request request: requests) {
+    for (Request request : requests) {
       filteredRequests.add(request.sortWith(alphaComp).filterWith(testFilter));
     }
     // This will iterate over all of the test serially, calling shouldRun() above.
     // It's needed to guarantee stable sharding in all situations.
-    for (Request request: filteredRequests) {
+    for (Request request : filteredRequests) {
       request.getRunner().getDescription();
     }
     return filteredRequests;
-  }
-
-  private void notFoundError(String spec, PrintStream out, Throwable t) {
-    out.printf("FATAL: Error during test discovery for %s: %s\n", spec, t);
-    throw new RuntimeException("Classloading error during test discovery for " + spec, t);
   }
 
   /**
@@ -632,9 +718,16 @@ public class ConsoleRunnerImpl {
           usage = "Show a description of each test and timer for each test class.")
       private boolean perTestTimer;
 
+      // TODO(zundel): This argument is deprecated, remove in a future release
       @Option(name = "-default-parallel",
-          usage = "Whether to run test classes without @TestParallel or @TestSerial in parallel.")
+          usage = "DEPRECATED: use -default-concurrency instead.\n"
+              + "Whether to run test classes without @TestParallel or @TestSerial in parallel.")
       private boolean defaultParallel;
+
+      @Option(name = "-default-concurrency",
+          usage = "Specify how to parallelize running tests.\n"
+          + "Use -use-experimental-runner for PARALLEL_METHODS and PARALLEL_CLASSES_AND_METHODS")
+      private Concurrency defaultConcurrency;
 
       private int parallelThreads = 0;
 
@@ -698,6 +791,10 @@ public class ConsoleRunnerImpl {
                 metaVar = "TESTS",
                 handler = StringArrayOptionHandler.class)
       private String[] tests = {};
+
+      @Option(name="-use-experimental-runner",
+          usage="Use the experimental runner that has support for parallel methods")
+      private boolean useExperimentalRunner = false;
     }
 
     Options options = new Options();
@@ -712,17 +809,24 @@ public class ConsoleRunnerImpl {
       exit(1);
     }
 
+    options.defaultConcurrency = computeConcurrencyOption(options.defaultConcurrency,
+        options.defaultParallel);
+
     ConsoleRunnerImpl runner =
         new ConsoleRunnerImpl(options.failFast,
             options.outputMode,
             options.xmlReport,
             options.perTestTimer,
             options.outdir,
-            options.defaultParallel,
+            options.defaultConcurrency,
             options.parallelThreads,
             options.testShard,
             options.numTestShards,
-            options.numRetries);
+            options.numRetries,
+            options.useExperimentalRunner,
+            // NB: Buffering helps speedup output-heavy tests.
+            new PrintStream(new BufferedOutputStream(System.out), true),
+            new PrintStream(new BufferedOutputStream(System.err), true));
 
     List<String> tests = Lists.newArrayList();
     for (String test : options.tests) {
@@ -738,56 +842,32 @@ public class ConsoleRunnerImpl {
         tests.add(test);
       }
     }
-
     runner.run(tests);
   }
 
-  public static final Predicate<Constructor<?>> IS_PUBLIC_CONSTRUCTOR =
-      new Predicate<Constructor<?>>() {
-        @Override public boolean apply(Constructor<?> constructor) {
-          return Modifier.isPublic(constructor.getModifiers());
-        }
-      };
+  /**
+   * Used to convert the legacy -default-parallel option to the new
+   * style -default-concurrency values
+   */
+  @VisibleForTesting
+  static Concurrency computeConcurrencyOption(Concurrency defaultConcurrency,
+      boolean defaultParallel) {
 
-  private static final Predicate<Method> IS_ANNOTATED_TEST_METHOD = new Predicate<Method>() {
-    @Override public boolean apply(Method method) {
-      return Modifier.isPublic(method.getModifiers())
-          && method.isAnnotationPresent(org.junit.Test.class);
-    }
-  };
-
-  private static boolean isTest(final Class<?> clazz) {
-    // Must be a public concrete class to be a runnable junit Test.
-    if (clazz.isInterface()
-        || Modifier.isAbstract(clazz.getModifiers())
-        || !Modifier.isPublic(clazz.getModifiers())) {
-      return false;
+    if (defaultConcurrency != null) {
+      // -default-concurrency option present - use it.
+      return defaultConcurrency;
     }
 
-    // The class must have some public constructor to be instantiated by the runner being used
-    if (!Iterables.any(Arrays.asList(clazz.getConstructors()), IS_PUBLIC_CONSTRUCTOR)) {
-      return false;
+    // Fall Back to using -default-parallel
+    if (!defaultParallel) {
+      return Concurrency.SERIAL;
     }
-
-    // Support junit 3.x Test hierarchy.
-    if (junit.framework.Test.class.isAssignableFrom(clazz)) {
-      return true;
-    }
-
-    // Support classes using junit 4.x custom runners.
-    if (clazz.isAnnotationPresent(RunWith.class)) {
-      return true;
-    }
-
-    // Support junit 4.x @Test annotated methods.
-    return Iterables.any(Arrays.asList(clazz.getMethods()), IS_ANNOTATED_TEST_METHOD);
+    return Concurrency.PARALLEL_CLASSES;
   }
 
   private static void exit(int code) {
-    exitStatus = code;
     if (callSystemExitOnFinish) {
       // We're a main - its fine to exit.
-      // SUPPRESS CHECKSTYLE RegexpSinglelineJava
       System.exit(code);
     } else {
       if (code != 0) {
@@ -798,15 +878,11 @@ public class ConsoleRunnerImpl {
 
   // ---------------------------- For testing only ---------------------------------
 
-  static void setCallSystemExitOnFinish(boolean v) {
-    callSystemExitOnFinish = v;
+  public static void setCallSystemExitOnFinish(boolean exitOnFinish) {
+    callSystemExitOnFinish = exitOnFinish;
   }
 
-  static int getExitStatus() {
-    return exitStatus;
-  }
-
-  static void setExitStatus(int v) {
-    exitStatus = v;
+  public static void addTestListener(RunListener listener) {
+    testListener = listener;
   }
 }

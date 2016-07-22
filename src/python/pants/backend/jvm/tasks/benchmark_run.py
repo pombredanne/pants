@@ -26,8 +26,8 @@ class BenchmarkRun(JvmToolTaskMixin, JvmTask):
   def register_options(cls, register):
     super(BenchmarkRun, cls).register_options(register)
     register('--target', help='Name of the benchmark class. This is a mandatory argument.')
-    register('--memory', default=False, action='store_true', help='Enable memory profiling.')
-    register('--debug', action='store_true',
+    register('--memory', type=bool, help='Enable memory profiling.')
+    register('--debug', type=bool,
              help='Run the benchmark tool with in process debugging.')
 
     cls.register_jvm_tool(register,
@@ -99,6 +99,7 @@ class BenchmarkRun(JvmToolTaskMixin, JvmTask):
                              workunit_factory=self.context.new_workunit,
                              workunit_name='caliper',
                              workunit_labels=[WorkUnitLabel.RUN],
-                             executor=java_executor)
+                             executor=java_executor,
+                             create_synthetic_jar=self.synthetic_classpath)
     if exit_code != 0:
       raise TaskError('java {} ... exited non-zero ({})'.format(self._CALIPER_MAIN, exit_code))

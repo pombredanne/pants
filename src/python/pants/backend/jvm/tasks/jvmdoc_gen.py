@@ -11,17 +11,16 @@ import multiprocessing
 import os
 import subprocess
 
-from twitter.common.collections import OrderedSet
-
 from pants.backend.jvm.tasks.jvm_task import JvmTask
 from pants.base.exceptions import TaskError
-from pants.binaries import binary_util
+from pants.util import desktop
 from pants.util.dirutil import safe_mkdir, safe_walk
 
 
 Jvmdoc = collections.namedtuple('Jvmdoc', ['tool_name', 'product_type'])
 
 
+# TODO: Shouldn't this be a NailgunTask?
 class JvmdocGen(JvmTask):
 
   @classmethod
@@ -34,24 +33,24 @@ class JvmdocGen(JvmTask):
     super(JvmdocGen, cls).register_options(register)
     tool_name = cls.jvmdoc().tool_name
 
-    register('--include-codegen', default=False, action='store_true',
+    register('--include-codegen', type=bool,
              fingerprint=True,
              help='Create {0} for generated code.'.format(tool_name))
 
-    register('--transitive', default=True, action='store_true',
+    register('--transitive', default=True, type=bool,
              fingerprint=True,
              help='Create {0} for the transitive closure of internal targets reachable from the '
                   'roots specified on the command line.'.format(tool_name))
 
-    register('--combined', default=False, action='store_true',
+    register('--combined', type=bool,
              fingerprint=True,
              help='Generate {0} for all targets combined, instead of each target '
                   'individually.'.format(tool_name))
 
-    register('--open', default=False, action='store_true',
+    register('--open', type=bool,
              help='Open the generated {0} in a browser (implies --combined).'.format(tool_name))
 
-    register('--ignore-failure', default=False, action='store_true',
+    register('--ignore-failure', type=bool,
              fingerprint=True,
              help='Do not consider {0} errors to be build errors.'.format(tool_name))
 
@@ -60,7 +59,7 @@ class JvmdocGen(JvmTask):
     # Remove this flag and instead support conditional requirements being registered against
     # the round manager.  This may require incremental or windowed flag parsing that happens bit by
     # bit as tasks are recursively prepared vs. the current all-at once style.
-    register('--skip', default=False, action='store_true',
+    register('--skip', type=bool,
              fingerprint=True,
              help='Skip {0} generation.'.format(tool_name))
 
@@ -141,7 +140,10 @@ class JvmdocGen(JvmTask):
         result, gendir = create_jvmdoc(command, gendir)
         self._handle_create_jvmdoc_result(targets, result, command)
     if self.open:
-      binary_util.ui_open(os.path.join(gendir, 'index.html'))
+      try:
+        desktop.ui_open(os.path.join(gendir, 'index.html'))
+      except desktop.OpenError as e:
+        raise TaskError(e)
 
   def _generate_individual(self, targets, create_jvmdoc_command):
     jobs = {}
@@ -157,7 +159,7 @@ class JvmdocGen(JvmTask):
             multiprocessing.Pool(processes=min(len(jobs), multiprocessing.cpu_count()))) as pool:
         # map would be a preferable api here but fails after the 1st batch with an internal:
         # ...
-        #  File "...src/python/pants/backend/core/tasks/jar_create.py", line 170, in javadocjar
+        #  File "...src/python/pants/backend/jvm/tasks/jar_create.py", line 170, in javadocjar
         #      pool.map(createjar, jobs)
         #    File "...lib/python2.6/multiprocessing/pool.py", line 148, in map
         #      return self.map_async(func, iterable, chunksize).get()

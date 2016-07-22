@@ -11,8 +11,7 @@ from pants.backend.jvm.targets.exclude import Exclude
 from pants.backend.jvm.targets.jar_dependency import JarDependency
 from pants.backend.python.python_requirement import PythonRequirement
 from pants.base.payload_field import (ExcludesField, FingerprintedField, FingerprintedMixin,
-                                      JarsField, PrimitiveField, PythonRequirementsField,
-                                      SourcesField)
+                                      JarsField, PrimitiveField, PythonRequirementsField)
 from pants_test.base_test import BaseTest
 
 
@@ -58,20 +57,6 @@ class PayloadTest(BaseTest):
       PythonRequirementsField([req2]).fingerprint(),
     )
 
-  def test_python_requirements_field_version_filter(self):
-    """version_filter is a lambda and can't be hashed properly.
-
-    Since in practice this is only ever used to differentiate between py3k and py2, it should use
-    a tuple of strings or even just a flag instead.
-    """
-    req1 = PythonRequirement('foo==1.0', version_filter=lambda py, pl: False)
-    req2 = PythonRequirement('foo==1.0')
-
-    self.assertEqual(
-      PythonRequirementsField([req1]).fingerprint(),
-      PythonRequirementsField([req2]).fingerprint(),
-    )
-
   def test_primitive_field(self):
     self.assertEqual(
       PrimitiveField({'foo': 'bar'}).fingerprint(),
@@ -94,7 +79,7 @@ class PayloadTest(BaseTest):
       PrimitiveField('bar').fingerprint(),
     )
 
-  def test_excludes_field(self):
+  def test_excludes_field_again(self):
     self.assertEqual(
       ExcludesField([Exclude('com', 'foo')]).fingerprint(),
       ExcludesField([Exclude('com', 'foo')]).fingerprint(),
@@ -111,66 +96,6 @@ class PayloadTest(BaseTest):
       ExcludesField([Exclude('com', 'foo'), Exclude('org', 'bar')]).fingerprint(),
       ExcludesField([Exclude('org', 'bar'), Exclude('com', 'foo')]).fingerprint(),
     )
-
-  def test_sources_field(self):
-    self.create_file('foo/bar/a.txt', 'a_contents')
-    self.create_file('foo/bar/b.txt', 'b_contents')
-
-    self.assertNotEqual(
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['a.txt'],
-      ).fingerprint(),
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['b.txt'],
-      ).fingerprint(),
-    )
-
-    self.assertEqual(
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['a.txt'],
-      ).fingerprint(),
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['a.txt'],
-      ).fingerprint(),
-    )
-
-    self.assertEqual(
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['a.txt'],
-      ).fingerprint(),
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['a.txt'],
-      ).fingerprint(),
-    )
-
-    self.assertEqual(
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['a.txt', 'b.txt'],
-      ).fingerprint(),
-      SourcesField(
-        sources_rel_path='foo/bar',
-        sources=['b.txt', 'a.txt'],
-      ).fingerprint(),
-    )
-
-    fp1 = SourcesField(
-            sources_rel_path='foo/bar',
-            sources=['a.txt'],
-          ).fingerprint()
-    self.create_file('foo/bar/a.txt', 'a_contents_different')
-    fp2 = SourcesField(
-            sources_rel_path='foo/bar',
-            sources=['a.txt'],
-          ).fingerprint()
-
-    self.assertNotEqual(fp1, fp2)
 
   def test_fingerprinted_field(self):
     class TestValue(FingerprintedMixin):

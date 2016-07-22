@@ -27,6 +27,8 @@ python_library(
   name = 'build_file_test_base',
   sources = ['build_file_test_base.py'],
   dependencies = [
+    '3rdparty/python:pathspec',
+    'src/python/pants/base:build_file',
     'src/python/pants/util:dirutil',
   ]
 )
@@ -40,6 +42,42 @@ python_tests(
     '3rdparty/python:six',
     'src/python/pants/base:build_file',
     'src/python/pants/util:dirutil',
+  ]
+)
+
+python_library(
+  name = 'project_tree_test_base',
+  sources = ['project_tree_test_base.py'],
+  dependencies = [
+    'src/python/pants/util:dirutil',
+    'src/python/pants/util:meta',
+  ]
+)
+
+python_library(
+  name = 'pants_ignore_test_base',
+  sources = ['pants_ignore_test_base.py'],
+  dependencies = [
+    ':project_tree_test_base',
+  ]
+)
+
+python_tests(
+  name = 'pants_ignore_file_system',
+  sources = ['test_pants_ignore_file_system.py'],
+  dependencies = [
+    ':pants_ignore_test_base',
+    'src/python/pants/base:project_tree',
+  ]
+)
+
+python_tests(
+  name = 'pants_ignore_scm',
+  sources = ['test_pants_ignore_scm.py'],
+  dependencies = [
+    ':pants_ignore_test_base',
+    'src/python/pants/base:project_tree',
+    'src/python/pants/scm:git',
   ]
 )
 
@@ -107,7 +145,6 @@ python_tests(
   name = 'payload',
   sources = ['test_payload.py'],
   dependencies = [
-    'src/python/pants/backend/core',
     'src/python/pants/base:payload',
     'src/python/pants/base:payload_field',
     'src/python/pants/build_graph',
@@ -119,7 +156,6 @@ python_tests(
   name = 'payload_field',
   sources = ['test_payload_field.py'],
   dependencies = [
-    'src/python/pants/backend/core',
     'src/python/pants/backend/jvm/targets:jvm',
     'src/python/pants/backend/python:python_requirement',
     'src/python/pants/base:payload_field',
@@ -152,15 +188,25 @@ python_tests(
   dependencies = [
     ':build_file_test_base',
     '3rdparty/python/twitter/commons:twitter.common.collections',
-    'src/python/pants/base:scm_build_file',
+    'src/python/pants/base:project_tree',
     'src/python/pants/scm:git',
     'src/python/pants/util:contextutil',
   ]
 )
 
 python_tests(
-  name = 'test_spec_exclude_integration',
-  sources = [ 'test_spec_exclude_integration.py' ],
+  name = 'bundle_integration',
+  sources = [ 'test_bundle_integration.py' ],
+  dependencies = [
+    'tests/python/pants_test:int-test',
+  ],
+  tags = {'integration'},
+  timeout = 120,
+)
+
+python_tests(
+  name = 'ignore_patterns_pants_ini_integration',
+  sources = [ 'test_ignore_patterns_pants_ini_integration.py' ],
   dependencies = [
     'tests/python/pants_test:int-test',
   ],

@@ -45,6 +45,8 @@ class RunTracker(Subsystem):
 
   Can track execution against multiple 'roots', e.g., one for the main thread and another for
   background threads.
+
+  :API: public
   """
   options_scope = 'run-tracker'
 
@@ -74,6 +76,9 @@ class RunTracker(Subsystem):
              help='Write stats to this local json file on run completion.')
 
   def __init__(self, *args, **kwargs):
+    """
+    :API: public
+    """
     super(RunTracker, self).__init__(*args, **kwargs)
     run_timestamp = time.time()
     cmd_line = ' '.join(['pants'] + sys.argv[1:])
@@ -95,6 +100,10 @@ class RunTracker(Subsystem):
 
     relative_symlink(self.run_info_dir, link_to_latest)
 
+    # A lock to ensure that adding to stats at the end of a workunit
+    # operates thread-safely.
+    self._stats_lock = threading.Lock()
+
     # Time spent in a workunit, including its children.
     self.cumulative_timings = AggregatedTimings(os.path.join(self.run_info_dir,
                                                              'cumulative_timings'))
@@ -105,6 +114,9 @@ class RunTracker(Subsystem):
     # Hit/miss stats for the artifact cache.
     self.artifact_cache_stats = \
       ArtifactCacheStats(os.path.join(self.run_info_dir, 'artifact_cache_stats'))
+
+    # Log of success/failure/aborted for each workunit.
+    self.outcomes = {}
 
     # Number of threads for foreground work.
     self._num_foreground_workers = self.get_options().num_foreground_workers
@@ -146,7 +158,8 @@ class RunTracker(Subsystem):
   def start(self, report):
     """Start tracking this pants run.
 
-    report: an instance of pants.reporting.Report."""
+    report: an instance of pants.reporting.Report.
+    """
     self.report = report
     self.report.open()
 
@@ -180,6 +193,8 @@ class RunTracker(Subsystem):
     Note that the outcome will automatically be set to failure if an exception is raised
     in a workunit, and to success otherwise, so usually you only need to set the
     outcome explicitly if you want to set it to warning.
+
+    :API: public
     """
     parent = self._threadlocal.current_workunit
     with self.new_workunit_under_parent(name, parent=parent, labels=labels, cmd=cmd,
@@ -202,6 +217,8 @@ class RunTracker(Subsystem):
            E.g., the cmd line of a compiler invocation.
 
     Task code should not typically call this directly.
+
+    :API: public
     """
     workunit = WorkUnit(run_info_dir=self.run_info_dir, parent=parent, name=name, labels=labels,
                         cmd=cmd, log_config=log_config)
@@ -272,7 +289,8 @@ class RunTracker(Subsystem):
       'run_info': self.run_info.get_as_dict(),
       'cumulative_timings': self.cumulative_timings.get_all(),
       'self_timings': self.self_timings.get_all(),
-      'artifact_cache_stats': self.artifact_cache_stats.get_all()
+      'artifact_cache_stats': self.artifact_cache_stats.get_all(),
+      'outcomes': self.outcomes
     }
     # Dump individual stat file.
     # TODO(benjy): Do we really need these, once the statsdb is mature?
@@ -334,8 +352,13 @@ class RunTracker(Subsystem):
   def end_workunit(self, workunit):
     self.report.end_workunit(workunit)
     path, duration, self_time, is_tool = workunit.end()
-    self.cumulative_timings.add_timing(path, duration, is_tool)
-    self.self_timings.add_timing(path, self_time, is_tool)
+
+    # These three operations may not be thread-safe, and workunits may run in separate threads
+    # and thus end concurrently, so we want to lock these operations.
+    with self._stats_lock:
+      self.cumulative_timings.add_timing(path, duration, is_tool)
+      self.self_timings.add_timing(path, self_time, is_tool)
+      self.outcomes[path] = workunit.outcome_string(workunit.outcome())
 
   def get_background_root_workunit(self):
     if self._background_root_workunit is None:

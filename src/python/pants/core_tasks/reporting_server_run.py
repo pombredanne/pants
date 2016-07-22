@@ -7,9 +7,10 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 
 import logging
 
-from pants.binaries import binary_util
+from pants.base.exceptions import TaskError
 from pants.reporting.reporting_server import ReportingServerManager
 from pants.task.task import QuietTaskMixin, Task
+from pants.util import desktop
 
 
 logger = logging.getLogger(__name__)
@@ -25,12 +26,12 @@ class ReportingServerRun(QuietTaskMixin, Task):
              help='Serve on this port. Leave unset to choose a free port '
                   'automatically (recommended if using pants concurrently in '
                   'multiple workspaces on the same host).')
-    register('--allowed-clients', action='append', default=['127.0.0.1'],
+    register('--allowed-clients', type=list, default=['127.0.0.1'],
              help='Only requests from these IPs may access this server. Useful for '
                   'temporarily showing build results to a colleague. The special '
                   'value ALL means any client may connect. Use with caution, as '
                   'your source code is exposed to all allowed clients!')
-    register('--open', action='store_true', default=False,
+    register('--open', type=bool,
              help='Attempt to open the server web ui in a browser.')
     register('--template-dir', advanced=True,
              help='Use templates from this dir instead of the defaults.')
@@ -39,7 +40,10 @@ class ReportingServerRun(QuietTaskMixin, Task):
 
   def _maybe_open(self, port):
     if self.get_options().open:
-      binary_util.ui_open('http://localhost:{port}'.format(port=port))
+      try:
+        desktop.ui_open('http://localhost:{port}'.format(port=port))
+      except desktop.OpenError as e:
+        raise TaskError(e)
 
   def execute(self):
     manager = ReportingServerManager(self.context, self.get_options())
@@ -53,5 +57,6 @@ class ReportingServerRun(QuietTaskMixin, Task):
 
       logger.info('Launched server with pid {pid} at http://localhost:{port}'
                   .format(pid=manager.pid, port=manager.socket))
+      logger.info('To kill, run `./pants killserver`')
 
     self._maybe_open(manager.socket)

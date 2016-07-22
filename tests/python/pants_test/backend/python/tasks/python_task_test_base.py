@@ -10,28 +10,27 @@ from textwrap import dedent
 
 from pants.backend.python.register import build_file_aliases as register_python
 from pants.build_graph.address import Address
+from pants_test.backend.python.tasks.interpreter_cache_test_mixin import InterpreterCacheTestMixin
 from pants_test.tasks.task_test_base import TaskTestBase
 
 
-class PythonTaskTestBase(TaskTestBase):
-  def setUp(self):
-    super(PythonTaskTestBase, self).setUp()
-
-    # Use the "real" interpreter cache, so tests don't waste huge amounts of time recreating it.
-    # It would be nice to get the location of the real interpreter cache from PythonSetup,
-    # but unfortunately real subsystems aren't available here (for example, we have no access
-    # to the enclosing pants instance's options), so we have to hard-code it.
-    python_setup_workdir = os.path.join(self.real_build_root, '.pants.d', 'python-setup')
-    self.set_options_for_scope('python-setup',
-        interpreter_cache_dir=os.path.join(python_setup_workdir, 'interpreters'),
-        chroot_cache_dir=os.path.join(python_setup_workdir, 'chroots'))
+class PythonTaskTestBase(InterpreterCacheTestMixin, TaskTestBase):
+  """
+  :API: public
+  """
 
   @property
   def alias_groups(self):
+    """
+    :API: public
+    """
     return register_python()
 
   def create_python_library(self, relpath, name, source_contents_map=None,
                             dependencies=(), provides=None):
+    """
+    :API: public
+    """
     sources = ['__init__.py'] + source_contents_map.keys() if source_contents_map else None
     sources_strs = ["'{0}'".format(s) for s in sources] if sources else None
     self.create_file(relpath=self.build_path(relpath), contents=dedent("""
@@ -55,6 +54,9 @@ class PythonTaskTestBase(TaskTestBase):
     return self.target(Address(relpath, name).spec)
 
   def create_python_binary(self, relpath, name, entry_point, dependencies=(), provides=None):
+    """
+    :API: public
+    """
     self.create_file(relpath=self.build_path(relpath), contents=dedent("""
     python_binary(
       name='{name}',
@@ -69,6 +71,9 @@ class PythonTaskTestBase(TaskTestBase):
     return self.target(Address(relpath, name).spec)
 
   def create_python_requirement_library(self, relpath, name, requirements):
+    """
+    :API: public
+    """
     def make_requirement(req):
       return 'python_requirement("{}")'.format(req)
 

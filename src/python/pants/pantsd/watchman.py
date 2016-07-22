@@ -5,6 +5,7 @@
 from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
                         unicode_literals, with_statement)
 
+import functools
 import json
 import logging
 import os
@@ -12,28 +13,43 @@ from collections import namedtuple
 
 from pants.pantsd.process_manager import ProcessManager
 from pants.pantsd.watchman_client import StreamableWatchmanClient
-from pants.util.dirutil import safe_mkdir
+from pants.util.dirutil import safe_file_dump, safe_mkdir
+from pants.util.retry import retry_on_exception
 
 
 class Watchman(ProcessManager):
   """Watchman process manager and helper class."""
 
-  SOCKET_TIMEOUT_SECONDS = 1
+  SOCKET_TIMEOUT_SECONDS = 5.0
 
   EventHandler = namedtuple('EventHandler', ['name', 'metadata', 'callback'])
 
-  def __init__(self, work_dir, log_level=1, watchman_path=None):
-    super(Watchman, self).__init__(name='watchman', process_name='watchman', socket_type=str)
-    self._logger = logging.getLogger(__name__)
+  def __init__(self, watchman_path, work_dir, log_level='1', timeout=SOCKET_TIMEOUT_SECONDS,
+               socket_path_override=None, metadata_base_dir=None):
+    """
+    :param str watchman_path: The path to the watchman binary.
+    :param str work_dir: The path to the pants work dir.
+    :param float timeout: The watchman socket timeout (in seconds).
+    :param str log_level: The watchman log level. Watchman has 3 log levels: '0' for no logging,
+                          '1' for standard logging and '2' for verbose logging.
+    :param str socket_path_override: The overridden target path of the watchman socket, if any.
+    :param str metadata_base_dir: The overriden metadata base dir for `ProcessMetadataManager`.
+    """
+    super(Watchman, self).__init__(name='watchman',
+                                   process_name='watchman',
+                                   socket_type=str,
+                                   metadata_base_dir=metadata_base_dir)
+    self._watchman_path = self._normalize_watchman_path(watchman_path)
+    self._watchman_work_dir = os.path.join(work_dir, self.name)
     self._log_level = log_level
-    self.watchman_path = self._resolve_watchman_path(watchman_path)
+    self._timeout = timeout
 
-    # TODO(kwlzn): should these live in .pids or .pants.d? i.e. should watchman survive clean-all?
-    self._work_dir = os.path.join(work_dir, self.name)
-    self._state_file = os.path.join(self._work_dir, '{}.state'.format(self.name))
-    self._log_file = os.path.join(self._work_dir, '{}.log'.format(self.name))
-    self._sock_file = os.path.join(self._work_dir, '{}.sock'.format(self.name))
+    self._state_file = os.path.join(self._watchman_work_dir, '{}.state'.format(self.name))
+    self._log_file = os.path.join(self._watchman_work_dir, '{}.log'.format(self.name))
+    self._sock_file = socket_path_override or os.path.join(self._watchman_work_dir,
+                                                           '{}.sock'.format(self.name))
 
+    self._logger = logging.getLogger(__name__)
     self._watchman_client = None
 
   @property
@@ -42,34 +58,23 @@ class Watchman(ProcessManager):
       self._watchman_client = self._make_client()
     return self._watchman_client
 
-  def _make_client(self, timeout=SOCKET_TIMEOUT_SECONDS):
+  def _make_client(self):
     """Create a new watchman client using the BSER protocol over a UNIX socket."""
-    return StreamableWatchmanClient(sockpath=self.socket, transport='local', timeout=timeout)
+    return StreamableWatchmanClient(sockpath=self.socket, transport='local', timeout=self._timeout)
 
   def _is_valid_executable(self, binary_path):
     return os.path.isfile(binary_path) and os.access(binary_path, os.X_OK)
 
-  def _find_watchman_in_path(self):
-    for path in os.environ['PATH'].split(os.pathsep):
-      binary_path = os.path.join(path, self.process_name)
-      if self._is_valid_executable(binary_path):
-        return binary_path
-
-  def _resolve_watchman_path(self, watchman_path=None):
-    if watchman_path is not None:
-      if not self._is_valid_executable(watchman_path):
-        raise self.ExecutionError('invalid watchman binary at {}!'.format(watchman_path))
-    else:
-      watchman_path = self._find_watchman_in_path()
-      if not watchman_path:
-        raise self.ExecutionError('could not locate watchman in $PATH!')
-
+  def _normalize_watchman_path(self, watchman_path):
+    if not self._is_valid_executable(watchman_path):
+      raise self.ExecutionError('invalid watchman binary at {}!'.format(watchman_path))
     return os.path.abspath(watchman_path)
 
   def _maybe_init_metadata(self):
-    safe_mkdir(self._work_dir)
+    self._logger.debug('ensuring creation of directory: {}'.format(self._watchman_work_dir))
+    safe_mkdir(self._watchman_work_dir)
     # Initialize watchman with an empty, but valid statefile so it doesn't complain on startup.
-    self._write_file(self._state_file, '{}')
+    safe_file_dump(self._state_file, '{}')
 
   def _construct_cmd(self, cmd_parts, state_file, sock_file, log_file, log_level):
     return [part for part in cmd_parts] + ['--no-save-state',
@@ -96,7 +101,7 @@ class Watchman(ProcessManager):
 
     This is possible due to watchman's built-in async server startup - no double-forking required.
     """
-    cmd = self._construct_cmd((self.watchman_path, 'get-pid'),
+    cmd = self._construct_cmd((self._watchman_path, 'get-pid'),
                               state_file=self._state_file,
                               sock_file=self._sock_file,
                               log_file=self._log_file,
@@ -104,8 +109,21 @@ class Watchman(ProcessManager):
     self._logger.debug('watchman cmd is: {}'.format(' '.join(cmd)))
     self._maybe_init_metadata()
 
-    # Spawn the watchman server (if not already running). Raise ExecutionError on failure.
-    output = self.get_subprocess_output(cmd)
+    # Watchman is launched via its cli. By running the 'get-pid' command on the client we implicitly
+    # launch the Watchman daemon. This approach is somewhat error-prone - in some cases the client
+    # can successfully trigger the launch of the Watchman daemon, but fail to return successfully
+    # for the 'get-pid' result due to server <-> daemon socket issues - these can look like:
+    #
+    #   2016-04-01T17:31:23,820: [cli] unable to talk to your watchman
+    #                                  on .../watchman.sock! (Permission denied)
+    #
+    # This results in a subprocess execution failure and leaves us with no pid information to write
+    # to the metadata directory - while in reality a Watchman daemon is actually running but now
+    # untracked. To safeguard against this, we retry the (idempotent) 'get-pid' command a few times
+    # to give the server-side socket setup a few chances to quiesce before potentially orphaning it.
+
+    get_output = functools.partial(self.get_subprocess_output, cmd)
+    output = retry_on_exception(get_output, 3, (self.ExecutionError,), lambda n: n * .5)
 
     # Parse the watchman PID from the cli output.
     pid = self._parse_pid_from_output(output)
@@ -117,17 +135,16 @@ class Watchman(ProcessManager):
   def watch_project(self, path):
     """Issues the watch-project command to watchman to begin watching the buildroot.
 
-       :param string path: the path to the watchman project root/pants build root.
+    :param string path: the path to the watchman project root/pants build root.
     """
-    # TODO(kwlzn): this can fail with SocketTimeout - add retry.
     return self.client.query('watch-project', os.path.realpath(path))
 
   def subscribed(self, build_root, handlers):
     """Bulk subscribe generator for StreamableWatchmanClient.
 
-       :param str build_root: the build_root for all subscriptions.
-       :param iterable handlers: a sequence of Watchman.EventHandler namedtuple objects.
-       :yields: a stream of tuples in the form (subscription_name: str, subscription_event: dict).
+    :param str build_root: the build_root for all subscriptions.
+    :param iterable handlers: a sequence of Watchman.EventHandler namedtuple objects.
+    :yields: a stream of tuples in the form (subscription_name: str, subscription_event: dict).
     """
     command_list = [['subscribe',
                      build_root,

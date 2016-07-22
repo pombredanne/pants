@@ -3,7 +3,7 @@
 
 python_tests(
   name = 'reporting',
-  sources = globs('*.py'),
+  sources = ['test_linkify.py'],
   dependencies = [
     'src/python/pants/reporting',
   ]
@@ -17,4 +17,5 @@ python_tests(
     'tests/python/pants_test:int-test'
   ],
   tags = {'integration'},
+  timeout = 120,
 )

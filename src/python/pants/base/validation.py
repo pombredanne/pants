@@ -9,13 +9,14 @@ from six import string_types
 from twitter.common.collections import OrderedSet
 from twitter.common.dirutil.fileset import Fileset
 
-from pants.backend.core.wrapped_globs import FilesetWithSpec
-
 
 def assert_list(obj, expected_type=string_types, can_be_none=True, default=(), key_arg=None,
-    allowable=(list, Fileset, FilesetWithSpec, OrderedSet, set, tuple), raise_type=ValueError):
+    allowable=(list, Fileset, OrderedSet, set, tuple), raise_type=ValueError):
   """
   This function is used to ensure that parameters set by users in BUILD files are of acceptable types.
+
+  :API: public
+
   :param obj           : the object that may be a list. It will pass if it is of type in allowable.
   :param expected_type : this is the expected type of the returned list contents.
   :param can_be_none   : this defines whether or not the obj can be None. If True, return default.
@@ -29,6 +30,8 @@ def assert_list(obj, expected_type=string_types, can_be_none=True, default=(), k
       return ''
     else:
       return "In key '{}': ".format(key)
+
+  allowable = tuple(allowable)
 
   key_msg = get_key_msg(key_arg)
   val = obj

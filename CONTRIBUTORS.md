@@ -1,27 +1,36 @@
-Created by running `./build-support/bin/contributors.sh`.
+Created by running `build-support/bin/contributors.sh`.
 
++ Aaron Mitchell
 + Alan Paulin
 + Alexander Johnson
 + Alyssa Pohahau
++ Andrew Hamilton
 + Andy Reitz
 + Antoine Tollenaere
 + Benjy Weinberger
 + Bill Farner
 + Brian Larson
 + Brian Wickman
++ Bruno Bieth
 + Chris Aniszczyk
++ Chris Burroughs
 + Chris Chen
++ Chris Heisterkamp
 + Chris Pesto
 + Cody Gibb
 + Craig Schertz
 + Dan Davydov
++ Dan Fabulich
 + Dan Harrison
 + Daniel Anderson
++ Daniel Bentley
 + David Taylor
 + David Turner
 + Divij Rajkumar
 + Dominic Hamon
 + Dumitru Daniliuc
++ Ebube Chuba
++ Emily Caveness
 + Eric Ayers
 + Eric Danielson
 + Eric Lindvall
@@ -33,6 +42,7 @@ Created by running `./build-support/bin/contributors.sh`.
 + Harley Cooper
 + Hwasung Lee
 + Igor Morozov
++ Ikai Lan
 + Itay Donanhirsh
 + Ity Kaul
 + Jackson Davis
@@ -80,9 +90,11 @@ Created by running `./build-support/bin/contributors.sh`.
 + Michael Doherty
 + Mike Lindsey
 + Misho Krastev
++ Moses Nakamura
 + Neil Sanchala
 + Nick Howard
 + Nik Shkrob
++ Nitay Joffe
 + Oliver Gould
 + Patrick Lawson
 + Paul Groudas
@@ -109,4 +121,6 @@ Created by running `./build-support/bin/contributors.sh`.
 + Travis Crawford
 + Ugo Di Girolamo
 + Wei An
++ Wolfram Arnold
 + Yi Cheng
++ Yujie Chen

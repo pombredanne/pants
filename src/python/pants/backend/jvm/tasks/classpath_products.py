@@ -7,6 +7,8 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 
 import os
 
+from twitter.common.collections import OrderedSet
+
 from pants.backend.jvm.targets.exclude import Exclude
 from pants.backend.jvm.targets.jvm_target import JvmTarget
 from pants.base.exceptions import TaskError
@@ -15,7 +17,10 @@ from pants.goal.products import UnionProducts
 
 
 class ClasspathEntry(object):
-  """Represents a java classpath entry."""
+  """Represents a java classpath entry.
+
+  :API: public
+  """
 
   def __init__(self, path):
     self._path = path
@@ -25,6 +30,8 @@ class ClasspathEntry(object):
     """Returns the pants internal path of this classpath entry.
 
     Suitable for use in constructing classpaths for pants executions and pants generated artifacts.
+
+    :API: public
 
     :rtype: string
     """
@@ -51,9 +58,26 @@ class ClasspathEntry(object):
   def __repr__(self):
     return 'ClasspathEntry(path={!r})'.format(self.path)
 
+  @classmethod
+  def is_artifact_classpath_entry(cls, classpath_entry):
+    """
+    :API: public
+    """
+    return isinstance(classpath_entry, ArtifactClasspathEntry)
+
+  @classmethod
+  def is_internal_classpath_entry(cls, classpath_entry):
+    """
+    :API: public
+    """
+    return not cls.is_artifact_classpath_entry(classpath_entry)
+
 
 class ArtifactClasspathEntry(ClasspathEntry):
-  """Represents a resolved third party classpath entry."""
+  """Represents a resolved third party classpath entry.
+
+  :API: public
+  """
 
   def __init__(self, path, coordinate, cache_path):
     super(ArtifactClasspathEntry, self).__init__(path)
@@ -77,6 +101,8 @@ class ArtifactClasspathEntry(ClasspathEntry):
 
     Suitable for use in constructing classpaths for external tools that should not be subject to
     potential volatility in pants own internal caches.
+
+    :API: public
 
     :rtype: string
     """
@@ -114,13 +140,18 @@ def _matches_exclude(coordinate, exclude):
 
 
 def _not_excluded_filter(excludes):
-  def not_excluded(path_tuple):
+  def not_excluded(product_to_target):
+    path_tuple = product_to_target[0]
     conf, classpath_entry = path_tuple
     return not classpath_entry.is_excluded_by(excludes)
   return not_excluded
 
 
 class ClasspathProducts(object):
+  """
+  :API: public
+  """
+
   def __init__(self, pants_workdir, classpaths=None, excludes=None):
     self._classpaths = classpaths or UnionProducts()
     self._excludes = excludes or UnionProducts()
@@ -128,6 +159,9 @@ class ClasspathProducts(object):
 
   @staticmethod
   def init_func(pants_workdir):
+    """
+    :API: public
+    """
     return lambda: ClasspathProducts(pants_workdir)
 
   def copy(self):
@@ -136,6 +170,8 @@ class ClasspathProducts(object):
     Edits to the copy's classpaths or exclude associations will not affect the classpaths or
     excludes in the original. The copy is shallow though, so edits to the the copy's product values
     will mutate the original's product values.  See `UnionProducts.copy`.
+
+    :API: public
 
     :rtype: :class:`ClasspathProducts`
     """
@@ -217,11 +253,25 @@ class ClasspathProducts(object):
     :returns: The ordered (conf, classpath entry) tuples.
     :rtype: list of (string, :class:`ClasspathEntry`)
     """
-    classpath_tuples = self._classpaths.get_for_targets(targets)
+
+    # remove the duplicate, preserve the ordering.
+    return list(OrderedSet([cp for cp, target in self.get_product_target_mappings_for_targets(
+                            targets, respect_excludes)]))
+
+  def get_product_target_mappings_for_targets(self, targets, respect_excludes=True):
+    """Gets the classpath products-target associations for the given targets.
+
+    Product-target tuples are returned in order, optionally respecting target excludes.
+
+    :param targets: The targets to lookup classpath products for.
+    :param bool respect_excludes: `True` to respect excludes; `False` to ignore them.
+    :returns: The ordered (classpath products, target) tuples.
+    """
+    classpath_target_tuples = self._classpaths.get_product_target_mappings_for_targets(targets)
     if respect_excludes:
-      return self._filter_by_excludes(classpath_tuples, targets)
+      return self._filter_by_excludes(classpath_target_tuples, targets)
     else:
-      return classpath_tuples
+      return classpath_target_tuples
 
   def get_artifact_classpath_entries_for_targets(self, targets, respect_excludes=True):
     """Gets the artifact classpath products for the given targets.
@@ -237,7 +287,7 @@ class ClasspathProducts(object):
     classpath_tuples = self.get_classpath_entries_for_targets(targets,
                                                               respect_excludes=respect_excludes)
     return [(conf, cp_entry) for conf, cp_entry in classpath_tuples
-            if isinstance(cp_entry, ArtifactClasspathEntry)]
+            if ClasspathEntry.is_artifact_classpath_entry(cp_entry)]
 
   def get_internal_classpath_entries_for_targets(self, targets, respect_excludes=True):
     """Gets the internal classpath products for the given targets.
@@ -253,14 +303,14 @@ class ClasspathProducts(object):
     classpath_tuples = self.get_classpath_entries_for_targets(targets,
                                                               respect_excludes=respect_excludes)
     return [(conf, cp_entry) for conf, cp_entry in classpath_tuples
-            if not isinstance(cp_entry, ArtifactClasspathEntry)]
+            if ClasspathEntry.is_internal_classpath_entry(cp_entry)]
 
-  def _filter_by_excludes(self, classpath_tuples, root_targets):
+  def _filter_by_excludes(self, classpath_target_tuples, root_targets):
     # Excludes are always applied transitively, so regardless of whether a transitive
     # set of targets was included here, their closure must be included.
     closure = BuildGraph.closure(root_targets, bfs=True)
     excludes = self._excludes.get_for_targets(closure)
-    return filter(_not_excluded_filter(excludes), classpath_tuples)
+    return filter(_not_excluded_filter(excludes), classpath_target_tuples)
 
   def _add_excludes_for_target(self, target):
     if target.is_exported:
@@ -291,3 +341,12 @@ class ClasspathProducts(object):
         raise TaskError(
           'Classpath entry {} for target {} is located outside the working directory "{}".'
           .format(path, target.address.spec, self._pants_workdir))
+
+  def __eq__(self, other):
+    return (isinstance(other, ClasspathProducts) and
+            self._pants_workdir == other._pants_workdir and
+            self._classpaths == other._classpaths and
+            self._excludes == other._excludes)
+
+  def __ne__(self, other):
+    return not self == other

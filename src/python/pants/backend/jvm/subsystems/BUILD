@@ -27,6 +27,8 @@ python_library(
   sources = ['java.py'],
   dependencies = [
     ':zinc_language_mixin',
+    'src/python/pants/build_graph',
+    'src/python/pants/option',
     'src/python/pants/subsystem',
   ],
 )
@@ -54,6 +56,19 @@ python_library(
 )
 
 python_library(
+  name = 'jar_dependency_management',
+  sources = ['jar_dependency_management.py'],
+  dependencies = [
+    'src/python/pants/backend/jvm/targets:jvm',
+    'src/python/pants/base:revision',
+    'src/python/pants/build_graph',
+    'src/python/pants/option',
+    'src/python/pants/subsystem',
+    'src/python/pants/task',
+  ],
+)
+
+python_library(
   name = 'scala_platform',
   sources = ['scala_platform.py'],
   dependencies = [
@@ -61,6 +76,7 @@ python_library(
     ':zinc_language_mixin',
     'src/python/pants/option',
     'src/python/pants/subsystem',
+    'src/python/pants/backend/jvm/targets:jvm',
     'src/python/pants/util:memo',
   ],
 )
@@ -75,6 +91,7 @@ python_library(
     'src/python/pants/java:executor',
     'src/python/pants/subsystem',
     'src/python/pants/util:contextutil',
+    'src/python/pants/util:objects',
   ]
 )
 

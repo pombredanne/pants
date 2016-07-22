@@ -15,3 +15,14 @@ python_library(
     'file_test_util.py',
   ],
 )
+
+python_library(
+  name = 'git_util',
+  sources = [
+    'git_util.py',
+  ],
+  dependencies = [
+    'src/python/pants/base:revision',
+    'src/python/pants/scm:git',
+  ],
+)

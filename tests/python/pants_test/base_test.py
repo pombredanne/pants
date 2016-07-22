@@ -12,18 +12,19 @@ from collections import defaultdict
 from tempfile import mkdtemp
 from textwrap import dedent
 
-from pants.base.build_file import FilesystemBuildFile
+from pants.base.build_file import BuildFile
 from pants.base.build_root import BuildRoot
 from pants.base.cmd_line_spec_parser import CmdLineSpecParser
 from pants.base.exceptions import TaskError
+from pants.base.file_system_project_tree import FileSystemProjectTree
 from pants.build_graph.address import Address
 from pants.build_graph.build_configuration import BuildConfiguration
 from pants.build_graph.build_file_address_mapper import BuildFileAddressMapper
 from pants.build_graph.build_file_aliases import BuildFileAliases
 from pants.build_graph.build_file_parser import BuildFileParser
-from pants.build_graph.build_graph import BuildGraph
+from pants.build_graph.mutable_build_graph import MutableBuildGraph
 from pants.build_graph.target import Target
-from pants.goal.goal import Goal
+from pants.pantsd.util import clean_global_runtime_state
 from pants.source.source_root import SourceRootConfig
 from pants.subsystem.subsystem import Subsystem
 from pants.util.dirutil import safe_mkdir, safe_open, safe_rmtree
@@ -34,10 +35,17 @@ from pants_test.option.util.fakes import create_options_for_optionables
 # TODO: Rename to 'TestBase', for uniformity, and also for logic: This is a baseclass
 # for tests, not a test of a thing called 'Base'.
 class BaseTest(unittest.TestCase):
-  """A baseclass useful for tests requiring a temporary buildroot."""
+  """A baseclass useful for tests requiring a temporary buildroot.
+
+  :API: public
+
+  """
 
   def build_path(self, relpath):
-    """Returns the canonical BUILD file path for the given relative build path."""
+    """Returns the canonical BUILD file path for the given relative build path.
+
+    :API: public
+    """
     if os.path.basename(relpath).startswith('BUILD'):
       return relpath
     else:
@@ -45,6 +53,8 @@ class BaseTest(unittest.TestCase):
 
   def create_dir(self, relpath):
     """Creates a directory under the buildroot.
+
+    :API: public
 
     relpath: The relative path to the directory from the build root.
     """
@@ -55,6 +65,8 @@ class BaseTest(unittest.TestCase):
   def create_workdir_dir(self, relpath):
     """Creates a directory under the work directory.
 
+    :API: public
+
     relpath: The relative path to the directory from the work directory.
     """
     path = os.path.join(self.pants_workdir, relpath)
@@ -63,6 +75,8 @@ class BaseTest(unittest.TestCase):
 
   def create_file(self, relpath, contents='', mode='wb'):
     """Writes to a file under the buildroot.
+
+    :API: public
 
     relpath:  The relative path to the file from the build root.
     contents: A string containing the contents of the file - '' by default..
@@ -76,6 +90,8 @@ class BaseTest(unittest.TestCase):
   def create_workdir_file(self, relpath, contents='', mode='wb'):
     """Writes to a file under the work directory.
 
+    :API: public
+
     relpath:  The relative path to the file from the work directory.
     contents: A string containing the contents of the file - '' by default..
     mode:     The mode to write to the file in - over-write by default.
@@ -88,20 +104,24 @@ class BaseTest(unittest.TestCase):
   def add_to_build_file(self, relpath, target):
     """Adds the given target specification to the BUILD file at relpath.
 
+    :API: public
+
     relpath: The relative path to the BUILD file from the build root.
     target:  A string containing the target definition as it would appear in a BUILD file.
     """
     self.create_file(self.build_path(relpath), target, mode='a')
-    cls = self.address_mapper._build_file_type
-    return cls(root_dir=self.build_root, relpath=self.build_path(relpath))
+    return BuildFile(self.address_mapper._project_tree, relpath=self.build_path(relpath))
 
   def make_target(self,
                   spec='',
                   target_type=Target,
                   dependencies=None,
                   derived_from=None,
+                  synthetic=False,
                   **kwargs):
     """Creates a target and injects it into the test's build graph.
+
+    :API: public
 
     :param string spec: The target address spec that locates this target.
     :param type target_type: The concrete target subclass to create this new target from.
@@ -118,7 +138,8 @@ class BaseTest(unittest.TestCase):
 
     self.build_graph.inject_target(target,
                                    dependencies=[dep.address for dep in dependencies],
-                                   derived_from=derived_from)
+                                   derived_from=derived_from,
+                                   synthetic=synthetic)
 
     # TODO(John Sirois): This re-creates a little bit too much work done by the BuildGraph.
     # Fixup the BuildGraph to deal with non BuildFileAddresses better and just leverage it.
@@ -139,16 +160,30 @@ class BaseTest(unittest.TestCase):
 
   @property
   def alias_groups(self):
+    """
+    :API: public
+    """
     return BuildFileAliases(targets={'target': Target})
 
+  @property
+  def build_ignore_patterns(self):
+    """
+    :API: public
+    """
+    return None
+
   def setUp(self):
+    """
+    :API: public
+    """
     super(BaseTest, self).setUp()
-    Goal.clear()
-    Subsystem.reset()
+    # Avoid resetting the Runtracker here, as that is specific to fork'd process cleanup.
+    clean_global_runtime_state(reset_runtracker=False, reset_subsystem=True)
 
     self.real_build_root = BuildRoot().path
 
     self.build_root = os.path.realpath(mkdtemp(suffix='_BUILD_ROOT'))
+    self.subprocess_dir = os.path.join(self.build_root, '.pids')
     self.addCleanup(safe_rmtree, self.build_root)
 
     self.pants_workdir = os.path.join(self.build_root, '.pants.d')
@@ -160,22 +195,29 @@ class BaseTest(unittest.TestCase):
       'pants_supportdir': os.path.join(self.build_root, 'build-support'),
       'pants_distdir': os.path.join(self.build_root, 'dist'),
       'pants_configdir': os.path.join(self.build_root, 'config'),
+      'pants_subprocessdir': self.subprocess_dir,
       'cache_key_gen_version': '0-test',
+    }
+    self.options['cache'] = {
+      'read_from': [],
+      'write_to': [],
     }
 
     BuildRoot().path = self.build_root
     self.addCleanup(BuildRoot().reset)
 
-    # We need a pants.ini, even if empty. get_buildroot() uses its presence.
-    self.create_file('pants.ini')
     self._build_configuration = BuildConfiguration()
     self._build_configuration.register_aliases(self.alias_groups)
     self.build_file_parser = BuildFileParser(self._build_configuration, self.build_root)
-    self.address_mapper = BuildFileAddressMapper(self.build_file_parser, FilesystemBuildFile)
-    self.build_graph = BuildGraph(address_mapper=self.address_mapper)
+    self.project_tree = FileSystemProjectTree(self.build_root)
+    self.address_mapper = BuildFileAddressMapper(self.build_file_parser, self.project_tree,
+                                                 build_ignore_patterns=self.build_ignore_patterns)
+    self.build_graph = MutableBuildGraph(address_mapper=self.address_mapper)
 
   def buildroot_files(self, relpath=None):
     """Returns the set of all files under the test build root.
+
+    :API: public
 
     :param string relpath: If supplied, only collect files from this subtree.
     :returns: All file paths found.
@@ -189,15 +231,17 @@ class BaseTest(unittest.TestCase):
 
   def reset_build_graph(self):
     """Start over with a fresh build graph with no targets in it."""
-    self.address_mapper = BuildFileAddressMapper(self.build_file_parser, FilesystemBuildFile)
-    self.build_graph = BuildGraph(address_mapper=self.address_mapper)
+    self.address_mapper = BuildFileAddressMapper(self.build_file_parser, FileSystemProjectTree(self.build_root))
+    self.build_graph = MutableBuildGraph(address_mapper=self.address_mapper)
 
   def set_options_for_scope(self, scope, **kwargs):
     self.options[scope].update(kwargs)
 
   def context(self, for_task_types=None, options=None, passthru_args=None, target_roots=None,
               console_outstream=None, workspace=None, for_subsystems=None):
-
+    """
+    :API: public
+    """
     # Many tests use source root functionality via the SourceRootConfig.global_instance()
     # (typically accessed via Target.target_base), so we always set it up, for convenience.
     optionables = {SourceRootConfig}
@@ -230,7 +274,10 @@ class BaseTest(unittest.TestCase):
     options = create_options_for_optionables(optionables,
                                              extra_scopes=extra_scopes,
                                              options=options)
-    Subsystem._options = options
+
+    Subsystem.reset(reset_options=True)
+    Subsystem.set_options(options)
+
     context = create_context(options=options,
                              passthru_args=passthru_args,
                              target_roots=target_roots,
@@ -242,12 +289,17 @@ class BaseTest(unittest.TestCase):
     return context
 
   def tearDown(self):
+    """
+    :API: public
+    """
     super(BaseTest, self).tearDown()
-    FilesystemBuildFile.clear_cache()
+    BuildFile.clear_cache()
     Subsystem.reset()
 
   def target(self, spec):
     """Resolves the given target address to a Target object.
+
+    :API: public
 
     address: The BUILD target address to resolve.
 
@@ -260,14 +312,16 @@ class BaseTest(unittest.TestCase):
   def targets(self, spec):
     """Resolves a target spec to one or more Target objects.
 
+    :API: public
+
     spec: Either BUILD target address or else a target glob using the siblings ':' or
           descendants '::' suffixes.
 
     Returns the set of all Targets found.
     """
 
-    spec_parser = CmdLineSpecParser(self.build_root, self.address_mapper)
-    addresses = list(spec_parser.parse_addresses(spec))
+    spec = CmdLineSpecParser(self.build_root).parse_spec(spec)
+    addresses = list(self.address_mapper.scan_specs([spec]))
     for address in addresses:
       self.build_graph.inject_address_closure(address)
     targets = [self.build_graph.get_target(address) for address in addresses]
@@ -275,6 +329,8 @@ class BaseTest(unittest.TestCase):
 
   def create_files(self, path, files):
     """Writes to a file under the buildroot with contents same as file name.
+
+    :API: public
 
      path:  The relative path to the file from the build root.
      files: List of file names.
@@ -284,6 +340,8 @@ class BaseTest(unittest.TestCase):
 
   def create_library(self, path, target_type, name, sources=None, **kwargs):
     """Creates a library target of given type at the BUILD file at path with sources
+
+    :API: public
 
      path: The relative path to the BUILD file from the build root.
      target_type: valid pants target type.
@@ -321,13 +379,22 @@ class BaseTest(unittest.TestCase):
     return self.target('%s:%s' % (path, name))
 
   def create_resources(self, path, name, *sources):
+    """
+    :API: public
+    """
     return self.create_library(path, 'resources', name, sources)
 
   def assertUnorderedPrefixEqual(self, expected, actual_iter):
-    """Consumes len(expected) items from the given iter, and asserts that they match, unordered."""
+    """Consumes len(expected) items from the given iter, and asserts that they match, unordered.
+
+    :API: public
+    """
     actual = list(itertools.islice(actual_iter, len(expected)))
     self.assertEqual(sorted(expected), sorted(actual))
 
   def assertPrefixEqual(self, expected, actual_iter):
-    """Consumes len(expected) items from the given iter, and asserts that they match, in order."""
+    """Consumes len(expected) items from the given iter, and asserts that they match, in order.
+
+    :API: public
+    """
     self.assertEqual(expected, list(itertools.islice(actual_iter, len(expected))))

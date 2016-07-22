@@ -16,17 +16,15 @@ class WhatChanged(ChangedFileTaskMixin, ConsoleTask):
   def register_options(cls, register):
     super(WhatChanged, cls).register_options(register)
     cls.register_change_file_options(register)
-    register('--files', action='store_true', default=False,
+    register('--files', type=bool,
              help='Show changed files instead of the targets that own them.')
 
   def console_output(self, _):
-    spec_excludes = self.get_options().spec_excludes
     change_calculator = self.change_calculator(self.get_options(),
                                                self.context.address_mapper,
                                                self.context.build_graph,
                                                scm=self.context.scm,
-                                               workspace=self.context.workspace,
-                                               spec_excludes=spec_excludes)
+                                               workspace=self.context.workspace)
     if self.get_options().files:
       for f in sorted(change_calculator.changed_files()):
         yield f

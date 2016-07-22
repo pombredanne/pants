@@ -7,7 +7,6 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 
 import logging
 
-from pants.option.custom_types import list_option
 from pants.subsystem.subsystem import Subsystem
 from pants.util.strutil import safe_shlex_split
 
@@ -16,28 +15,38 @@ logger = logging.getLogger(__name__)
 
 
 class JVM(Subsystem):
-  """A JVM invocation."""
+  """A JVM invocation.
+
+  :API: public
+  """
   options_scope = 'jvm'
+
+  # Broken out here instead of being inlined in the registration stanza,
+  # because various tests may need to access these.
+  options_default = ['-Xmx256m']
 
   @classmethod
   def register_options(cls, register):
     super(JVM, cls).register_options(register)
     # TODO(benjy): Options to specify the JVM version?
-    register('--options', action='append', metavar='<option>...',
+    register('--options', type=list, metavar='<option>...',
+             default=cls.options_default,
              help='Run with these extra JVM options.')
-    register('--program-args', action='append', metavar='<arg>...',
+    register('--program-args', type=list, metavar='<arg>...',
              help='Run with these extra program args.')
-    register('--debug', action='store_true',
+    register('--debug', type=bool,
              help='Run the JVM with remote debugging.')
     register('--debug-port', advanced=True, type=int, default=5005,
              help='The JVM will listen for a debugger on this port.')
-    register('--debug-args', advanced=True, type=list_option,
+    register('--debug-args', advanced=True, type=list,
              default=[
                '-Xdebug',
                '-Xrunjdwp:transport=dt_socket,server=y,suspend=y,address={debug_port}'
              ],
              help='The JVM remote-debugging arguments. {debug_port} will be replaced with '
                   'the value of the --debug-port option.')
+    register('--synthetic-classpath', advanced=True, type=bool, default=True,
+             help="Use synthetic jar to work around classpath length restrictions.")
 
   def get_jvm_options(self):
     """Return the options to run this JVM with.

@@ -30,13 +30,13 @@ function usage() {
   echo "              if running core python tests, divide them into"
   echo "              TOTAL_SHARDS shards and just run those in SHARD_NUMBER"
   echo "              to run only even tests: '-u 0/2', odd: '-u 1/2'"
+  echo " -a           skip android targets when running tests"
   echo " -n           skip contrib python tests"
   echo " -c           skip pants integration tests (includes examples and testprojects)"
   echo " -i SHARD_NUMBER/TOTAL_SHARDS"
   echo "              if running integration tests, divide them into"
   echo "              TOTAL_SHARDS shards and just run those in SHARD_NUMBER"
   echo "              to run only even tests: '-i 0/2', odd: '-i 1/2'"
-  echo " -a           skip android targets when running tests"
   if (( $# > 0 )); then
     die "$@"
   else
@@ -47,7 +47,6 @@ function usage() {
 bootstrap_compile_args=(
   compile.python-eval
   --closure
-  --fail-slow
 )
 
 # No python test sharding (1 shard) by default.
@@ -68,6 +67,7 @@ while getopts "hfxbkmsrjlpu:nci:a" opt; do
     l) skip_internal_backends="true" ;;
     p) skip_python="true" ;;
     u) python_unit_shard=${OPTARG} ;;
+    a) skip_android="true" ;;
     n) skip_contrib="true" ;;
     c) skip_integration="true" ;;
     i) python_intg_shard=${OPTARG} ;;
@@ -80,9 +80,7 @@ shift $((${OPTIND} - 1))
 # Android testing requires the SDK to be installed and configured in Pants.
 # Skip if ANDROID_HOME isn't configured in the environment
 if [[ -z "${ANDROID_HOME}"  || "${skip_android:-false}" == "true" ]] ; then
-  export SKIP_ANDROID="true"
-else
-  export SKIP_ANDROID="false"
+  export SKIP_ANDROID_PATTERN='contrib/android'
 fi
 
 if [[ $# > 0 ]]; then
@@ -132,7 +130,7 @@ if [[ "${skip_sanity_checks:-false}" == "false" ]]; then
   banner "Sanity checking bootstrapped pants and repo BUILD files"
   sanity_tests=(
     "bash-completion"
-    "builddict"
+    "reference"
     "clean-all"
     "goals"
     "list ::"
@@ -173,7 +171,7 @@ if [[ "${skip_internal_backends:-false}" == "false" ]]; then
       ./pants.pex list pants-plugins/tests/python:: | \
       xargs ./pants.pex filter --filter-type=python_tests
     ) && \
-    ./pants.pex ${PANTS_ARGS[@]} test.pytest --fail-slow ${targets}
+    ./pants.pex ${PANTS_ARGS[@]} test.pytest ${targets}
   ) || die "Internal backend python test failure"
 fi
 
@@ -188,9 +186,8 @@ if [[ "${skip_python:-false}" == "false" ]]; then
       xargs ./pants.pex --tag='-integration' filter --filter-type=python_tests
     ) && \
     ./pants.pex ${PANTS_ARGS[@]} test.pytest \
-      --fail-slow \
       --coverage=paths:pants/ \
-      --shard=${python_unit_shard} \
+      --test-pytest-test-shard=${python_unit_shard} \
       ${targets}
   ) || die "Core python test failure"
 fi
@@ -202,7 +199,7 @@ if [[ "${skip_contrib:-false}" == "false" ]]; then
     # test (ie: pants_test.contrib) namespace packages.
     # TODO(John Sirois): Get to the bottom of the issue and kill --no-fast, see:
     #  https://github.com/pantsbuild/pants/issues/1149
-    ./pants.pex ${PANTS_ARGS[@]} test.pytest --fail-slow --no-fast contrib::
+    ./pants.pex ${PANTS_ARGS[@]}  --exclude-target-regexp='.*/testprojects/.*' --ignore-patterns=$SKIP_ANDROID_PATTERN test.pytest --no-fast contrib::
   ) || die "Contrib python test failure"
 fi
 
@@ -216,7 +213,7 @@ if [[ "${skip_integration:-false}" == "false" ]]; then
       ./pants.pex list tests/python:: | \
       xargs ./pants.pex --tag='+integration' filter --filter-type=python_tests
     ) && \
-    ./pants.pex ${PANTS_ARGS[@]} test.pytest --fail-slow --shard=${python_intg_shard} ${targets}
+    ./pants.pex ${PANTS_ARGS[@]} test.pytest --test-pytest-test-shard=${python_intg_shard} ${targets}
   ) || die "Pants Integration test failure"
 fi
 

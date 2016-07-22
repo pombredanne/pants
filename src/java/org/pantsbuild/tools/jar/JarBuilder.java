@@ -370,7 +370,7 @@ public class JarBuilder implements Closeable {
   }
 
   /**
-   * Input stream that always insures that a non-empty stream ends with a newline.
+   * Input stream that always ensures that a non-empty stream ends with a newline.
    */
   private static class NewlineAppendingInputStream extends InputStream {
     private InputStream underlyingStream;
@@ -736,13 +736,14 @@ public class JarBuilder implements Closeable {
           Iterable<String> relpathComponents = relpathComponents(child, directory);
           Iterable<String> path = Iterables.concat(jarBasePath, relpathComponents);
           String entryPath = joinJarPath(relpathComponents);
-          if (!JarFile.MANIFEST_NAME.equals(entryPath)) {
+          String entryJarPath = joinJarPath(path);
+          if (!JarFile.MANIFEST_NAME.equals(entryJarPath)) {
             NamedByteSource contents =
                 NamedByteSource.create(
                     directorySource,
                     entryPath,
                     Files.asByteSource(child));
-            add(entries, contents, joinJarPath(path));
+            add(entries, contents, entryJarPath);
           }
         }
       }

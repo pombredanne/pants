@@ -5,9 +5,6 @@
 from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
                         unicode_literals, with_statement)
 
-import json
-
-from pants.base.exceptions import TaskError
 from pants.base.workunit import WorkUnitLabel
 from pants.util.dirutil import safe_mkdir
 
@@ -23,6 +20,13 @@ class NodeResolve(NodeTask):
   @classmethod
   def product_types(cls):
     return [NodePaths]
+
+  @classmethod
+  def prepare(cls, options, round_manager):
+    """Allow each resolver to declare additional product requirements."""
+    super(NodeResolve, cls).prepare(options, round_manager)
+    for resolver in cls._resolver_by_type.values():
+      resolver.prepare(options, round_manager)
 
   @property
   def cache_target_dirs(self):

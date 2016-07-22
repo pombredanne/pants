@@ -8,6 +8,7 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 import os
 import re
 
+from pants.backend.jvm.subsystems.scala_platform import ScalaPlatform
 from pants.backend.jvm.tasks.nailgun_task import NailgunTask
 from pants.base.exceptions import TaskError
 from pants.build_graph.target import Target
@@ -43,6 +44,8 @@ class Scalastyle(NailgunTask):
   """Checks scala source files to ensure they're stylish.
 
   Scalastyle only checks scala sources in non-synthetic targets.
+
+  :API: public
   """
 
   class UnspecifiedConfig(TaskError):
@@ -60,21 +63,22 @@ class Scalastyle(NailgunTask):
   _MAIN = 'org.scalastyle.Main'
 
   @classmethod
+  def subsystem_dependencies(cls):
+    return super(Scalastyle, cls).subsystem_dependencies() + (ScalaPlatform, )
+
+  @classmethod
   def register_options(cls, register):
     super(Scalastyle, cls).register_options(register)
-    register('--skip', action='store_true', fingerprint=True, help='Skip scalastyle.')
+    register('--skip', type=bool, fingerprint=True, help='Skip scalastyle.')
     register('--config', type=file_option, advanced=True, fingerprint=True,
              help='Path to scalastyle config file.')
     register('--excludes', type=file_option, advanced=True, fingerprint=True,
              help='Path to optional scalastyle excludes file. Each line is a regex. (Blank lines '
                   'and lines starting with \'#\' are ignored.) A file is skipped if its path '
                   '(relative to the repo root) matches any of these regexes.')
-    register('--jvm-options', action='append', metavar='<option>...', advanced=True,
-             help='Run scalastyle with these extra jvm options.')
     # TODO: Use the task's log level instead of this separate verbosity knob.
-    register('--verbose', action='store_true', default=False,
+    register('--verbose', type=bool,
              help='Enable verbose scalastyle output.')
-    cls.register_jvm_tool(register, 'scalastyle')
 
   @classmethod
   def get_non_synthetic_scala_targets(cls, targets):
@@ -129,6 +133,7 @@ class Scalastyle(NailgunTask):
       invalid_targets = [vt.target for vt in invalidation_check.invalid_vts]
 
       scalastyle_config = self.validate_scalastyle_config()
+
       scalastyle_verbose = self.get_options().verbose
       scalastyle_quiet = self.get_options().quiet or False
       scalastyle_excluder = self.create_file_excluder()
@@ -147,7 +152,7 @@ class Scalastyle(NailgunTask):
           def to_java_boolean(x):
             return str(x).lower()
 
-          cp = self.tool_classpath('scalastyle')
+          cp = ScalaPlatform.global_instance().style_classpath(self.context.products)
           scalastyle_args = [
             '-c', scalastyle_config,
             '-v', to_java_boolean(scalastyle_verbose),

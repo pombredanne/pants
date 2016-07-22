@@ -14,7 +14,8 @@ from pants.util.dirutil import safe_mkdir_for
 class AggregatedTimings(object):
   """Aggregates timings over multiple invocations of 'similar' work.
 
-  If filepath is not none, stores the timings in that file. Useful for finding bottlenecks."""
+  If filepath is not none, stores the timings in that file. Useful for finding bottlenecks.
+  """
 
   def __init__(self, path=None):
     # Map path -> timing in seconds (a float)

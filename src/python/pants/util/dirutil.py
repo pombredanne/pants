@@ -14,6 +14,7 @@ import tempfile
 import threading
 import uuid
 from collections import defaultdict
+from contextlib import contextmanager
 
 from pants.util.strutil import ensure_text
 
@@ -42,7 +43,10 @@ def fast_relpath(path, start):
 def safe_mkdir(directory, clean=False):
   """Ensure a directory is present.
 
-  If it's not there, create it.  If it is, no-op. If clean is True, ensure the dir is empty."""
+  If it's not there, create it.  If it is, no-op. If clean is True, ensure the dir is empty.
+
+  :API: public
+  """
   if clean:
     safe_rmtree(directory)
   try:
@@ -60,10 +64,25 @@ def safe_mkdir_for(path):
   safe_mkdir(os.path.dirname(path), clean=False)
 
 
-def safe_file_dump(path, content):
-  safe_mkdir_for(path)
-  with open(path, 'w') as outfile:
-    outfile.write(content)
+def safe_file_dump(filename, payload):
+  """Write a string to a file.
+
+  :param string filename: The filename of the file to write to.
+  :param string payload: The string to write to the file.
+  """
+  with safe_open(filename, 'wb') as f:
+    f.write(payload)
+
+
+def read_file(filename):
+  """Read and return the contents of a file in a single file.read().
+
+  :param string filename: The filename of the file to read.
+  :returns: The contents of the file.
+  :rtype: string
+  """
+  with open(filename, 'rb') as f:
+    return f.read()
 
 
 def safe_walk(path, **kwargs):
@@ -76,6 +95,7 @@ def safe_walk(path, **kwargs):
     unicode_literals. See e.g.
     https://mail.python.org/pipermail/python-dev/2008-December/083856.html
 
+    :API: public
   """
   # If os.walk is given a text argument, it yields text values; if it
   # is given a binary argument, it yields binary values.
@@ -111,6 +131,8 @@ def safe_mkdtemp(cleaner=_mkdtemp_atexit_cleaner, **kw):
   """Create a temporary directory that is cleaned up on process exit.
 
   Arguments are as to tempfile.mkdtemp.
+
+  :API: public
   """
   # Proper lock sanitation on fork [issue 6721] would be desirable here.
   with _MKDTEMP_LOCK:
@@ -126,13 +148,19 @@ def register_rmtree(directory, cleaner=_mkdtemp_atexit_cleaner):
 
 
 def safe_rmtree(directory):
-  """Delete a directory if it's present. If it's not present, no-op."""
+  """Delete a directory if it's present. If it's not present, no-op.
+
+  :API: public
+  """
   shutil.rmtree(directory, ignore_errors=True)
 
 
 def safe_open(filename, *args, **kwargs):
-  """Open a file safely, ensuring that its directory exists."""
-  safe_mkdir(os.path.dirname(filename))
+  """Open a file safely, ensuring that its directory exists.
+
+  :API: public
+  """
+  safe_mkdir_for(filename)
   return open(filename, *args, **kwargs)
 
 
@@ -163,20 +191,42 @@ def safe_concurrent_rename(src, dst):
       raise
 
 
-def safe_concurrent_create(func, path):
-  """Safely execute code that creates a file at a well-known path.
+def safe_rm_oldest_items_in_dir(root_dir, num_of_items_to_keep, excludes=frozenset()):
+  """
+  Keep `num_of_items_to_keep` newly modified items besides `excludes` in `root_dir` then remove the rest.
+  :param root_dir: the folder to examine
+  :param num_of_items_to_keep: number of files/folders/symlinks to keep after the cleanup
+  :param excludes: absolute paths excluded from removal (must be prefixed with `root_dir`)
+  :return: none
+  """
+  if os.path.isdir(root_dir):
+    found_files = []
+    for old_file in os.listdir(root_dir):
+      full_path = os.path.join(root_dir, old_file)
+      if full_path not in excludes:
+        found_files.append((full_path, os.path.getmtime(full_path)))
+    found_files = sorted(found_files, key=lambda x: x[1], reverse=True)
+    for cur_file, _ in found_files[num_of_items_to_keep:]:
+      rm_rf(cur_file)
+
+
+@contextmanager
+def safe_concurrent_creation(target_path):
+  """A contextmanager that yields a temporary path and renames it to a final target path when the
+  contextmanager exits.
 
   Useful when concurrent processes may attempt to create a file, and it doesn't matter who wins.
 
-  :param func: A callable that takes a single path argument and creates a file at that path.
-  :param path: The path to execute the callable on.
-  :return: func(path)'s return value.
+  :param target_path: The final target path to rename the temporary path to.
+  :yields: A temporary path containing the original path with a unique (uuid4) suffix.
   """
-  safe_mkdir_for(path)
-  tmp_path = '{0}.tmp.{1}'.format(path, uuid.uuid4().hex)
-  ret = func(tmp_path)
-  safe_concurrent_rename(tmp_path, path)
-  return ret
+  safe_mkdir_for(target_path)
+  tmp_path = '{}.tmp.{}'.format(target_path, uuid.uuid4().hex)
+  try:
+    yield tmp_path
+  finally:
+    if os.path.exists(tmp_path):
+      safe_concurrent_rename(tmp_path, target_path)
 
 
 def chmod_plus_x(path):
@@ -190,6 +240,34 @@ def chmod_plus_x(path):
   if path_mode & stat.S_IROTH:
     path_mode |= stat.S_IXOTH
   os.chmod(path, path_mode)
+
+
+def absolute_symlink(source_path, target_path):
+  """Create a symlink at target pointing to source using the absolute path.
+
+  :param source_path: Absolute path to source file
+  :param target_path: Absolute path to intended symlink
+  :raises ValueError if source_path or link_path are not unique, absolute paths
+  :raises OSError on failure UNLESS file already exists or no such file/directory
+  """
+  if not os.path.isabs(source_path):
+    raise ValueError("Path for source : {} must be absolute".format(source_path))
+  if not os.path.isabs(target_path):
+    raise ValueError("Path for link : {} must be absolute".format(target_path))
+  if source_path == target_path:
+    raise ValueError("Path for link is identical to source : {}".format(source_path))
+  try:
+    if os.path.lexists(target_path):
+      if os.path.islink(target_path) or os.path.isfile(target_path):
+        os.unlink(target_path)
+      else:
+        shutil.rmtree(target_path)
+    safe_mkdir_for(target_path)
+    os.symlink(source_path, target_path)
+  except OSError as e:
+    # Another run may beat us to deletion or creation.
+    if not (e.errno == errno.EEXIST or e.errno == errno.ENOENT):
+      raise
 
 
 def relative_symlink(source_path, link_path):
@@ -218,6 +296,10 @@ def relative_symlink(source_path, link_path):
 
 
 def relativize_path(path, rootdir):
+  """
+
+  :API: public
+  """
   # Note that we can't test for length and return the shorter of the two, because we need these
   # paths to be stable across systems (e.g., because they get embedded in analysis files),
   # and this choice might be inconsistent across systems. So we assume the relpath is always
@@ -237,6 +319,8 @@ def relativize_paths(paths, rootdir):
 
 def touch(path, times=None):
   """Equivalent of unix `touch path`.
+
+    :API: public
 
     :path: The file to touch.
     :times Either a tuple of (atime, mtime) or else a single time to use for both.  If not

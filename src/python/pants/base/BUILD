@@ -5,9 +5,26 @@ python_library(
   name = 'build_environment',
   sources = ['build_environment.py'],
   dependencies = [
-    'src/python/pants:version',
-    'src/python/pants/scm:all',
     ':build_root',
+    'src/python/pants/scm',
+    'src/python/pants/scm:git',
+    'src/python/pants:version',
+  ]
+)
+
+python_library(
+  name = 'project_tree',
+  sources = ['file_system_project_tree.py', 'project_tree.py', 'project_tree_factory.py',
+             'scm_project_tree.py'],
+  dependencies = [
+    '3rdparty/python:pathspec',
+    '3rdparty/python:scandir',
+    '3rdparty/python:six',
+    ':build_environment',
+    'src/python/pants/util:dirutil',
+    'src/python/pants/util:memo',
+    'src/python/pants/util:meta',
+    'src/python/pants/util:objects',
   ]
 )
 
@@ -16,16 +33,10 @@ python_library(
   sources = ['build_file.py'],
   dependencies = [
     '3rdparty/python/twitter/commons:twitter.common.collections',
+    '3rdparty/python:pathspec',
     'src/python/pants/util:dirutil',
     'src/python/pants/util:meta',
-  ]
-)
-
-python_library(
-  name = 'scm_build_file',
-  sources = ['scm_build_file.py'],
-  dependencies = [
-    ':build_file',
+    ':project_tree',
   ]
 )
 
@@ -35,11 +46,6 @@ python_library(
   dependencies = [
     'src/python/pants/util:meta',
   ]
-)
-
-python_library(
-  name = 'build_manual',
-  sources = ['build_manual.py'],
 )
 
 python_library(
@@ -111,10 +117,17 @@ python_library(
   sources = ['payload_field.py'],
   dependencies = [
     '3rdparty/python/twitter/commons:twitter.common.collections',
-    ':build_environment',
-    ':validation',
     'src/python/pants/util:meta',
   ]
+)
+
+python_library(
+  name = 'specs',
+  sources = ['specs.py'],
+  dependencies = [
+    'src/python/pants/util:meta',
+    'src/python/pants/util:objects',
+  ],
 )
 
 python_library(
@@ -138,24 +151,8 @@ python_library(
   dependencies = [
     '3rdparty/python/twitter/commons:twitter.common.collections',
     ':build_file',
+    ':specs',
     'src/python/pants/build_graph',
-  ],
-)
-
-python_library(
-  name = 'source_root',
-  sources = ['source_root.py'],
-  dependencies = [
-    ':build_environment',
-    ':build_file_target_factory',
-    ':build_manual',
-    ':deprecated',
-    ':exceptions',
-    ':parse_context',
-    '3rdparty/python/twitter/commons:twitter.common.collections',
-    # TEMPORARY dep during migration to new source roots mechanism.
-    # I've verified that this does not introduce a circular dep.
-    'src/python/pants/source',
   ],
 )
 
@@ -182,9 +179,8 @@ python_library(
   name='validation',
   sources=['validation.py'],
   dependencies=[
-    '3rdparty/python:six',
     '3rdparty/python/twitter/commons:twitter.common.collections',
     '3rdparty/python/twitter/commons:twitter.common.dirutil',
-    'src/python/pants/backend/core:wrapped_globs',
+    '3rdparty/python:six',
   ],
 )

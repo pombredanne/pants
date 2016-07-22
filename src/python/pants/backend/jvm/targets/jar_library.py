@@ -11,13 +11,16 @@ from twitter.common.collections import OrderedSet
 from pants.backend.jvm.targets.jar_dependency import JarDependency
 from pants.base.exceptions import TargetDefinitionException
 from pants.base.payload import Payload
-from pants.base.payload_field import ExcludesField, JarsField
+from pants.base.payload_field import ExcludesField, JarsField, PrimitiveField
 from pants.build_graph.address import Address
 from pants.build_graph.target import Target
 
 
 class JarLibrary(Target):
-  """A set of external JAR files."""
+  """A set of external JAR files.
+
+  :API: public
+  """
 
   class WrongTargetTypeError(Exception):
     """Thrown if the wrong type of target is encountered."""
@@ -27,15 +30,18 @@ class JarLibrary(Target):
     """Thrown if an object that is not an address."""
     pass
 
-  def __init__(self, payload=None, jars=None, **kwargs):
+  def __init__(self, payload=None, jars=None, managed_dependencies=None, **kwargs):
     """
     :param jars: List of `jar <#jar>`_\s to depend upon.
+    :param managed_dependencies: Address of a managed_jar_dependencies() target to use. If omitted, uses
+      the default managed_jar_dependencies() target set by --jar-dependency-management-default-target.
     """
     jars = self.assert_list(jars, expected_type=JarDependency, key_arg='jars')
     payload = payload or Payload()
     payload.add_fields({
       'jars': JarsField(jars),
       'excludes': ExcludesField([]),
+      'managed_dependencies': PrimitiveField(managed_dependencies),
     })
     super(JarLibrary, self).__init__(payload=payload, **kwargs)
     # NB: Waiting to validate until superclasses are initialized.
@@ -44,11 +50,30 @@ class JarLibrary(Target):
     self.add_labels('jars', 'jvm')
 
   @property
+  def managed_dependencies(self):
+    """The managed_jar_dependencies target this jar_library specifies, or None.
+
+    :API: public
+    """
+    if self.payload.managed_dependencies:
+      address = Address.parse(self.payload.managed_dependencies,
+                              relative_to=self.address.spec_path)
+      self._build_graph.inject_address_closure(address)
+      return self._build_graph.get_target(address)
+    return None
+
+  @property
   def jar_dependencies(self):
+    """
+    :API: public
+    """
     return self.payload.jars
 
   @property
   def excludes(self):
+    """
+    :API: public
+    """
     return self.payload.excludes
 
   @staticmethod
@@ -56,6 +81,8 @@ class JarLibrary(Target):
     """Convenience method to resolve a list of specs to JarLibraries and return its jars attributes.
 
     Expects that the jar_libraries are declared relative to this target.
+
+    :API: public
 
     :param Address relative_to: address target that references jar_library_specs, for
       error messages

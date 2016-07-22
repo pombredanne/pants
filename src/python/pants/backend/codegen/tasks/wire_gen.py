@@ -14,16 +14,16 @@ from pants.backend.codegen.targets.java_wire_library import JavaWireLibrary
 from pants.backend.codegen.tasks.simple_codegen_task import SimpleCodegenTask
 from pants.backend.jvm.targets.jar_dependency import JarDependency
 from pants.backend.jvm.targets.java_library import JavaLibrary
-from pants.backend.jvm.tasks.jvm_tool_task_mixin import JvmToolTaskMixin
+from pants.backend.jvm.tasks.nailgun_task import NailgunTaskBase
 from pants.base.build_environment import get_buildroot
 from pants.base.exceptions import TaskError
-from pants.java.distribution.distribution import DistributionLocator
+from pants.base.workunit import WorkUnitLabel
 
 
 logger = logging.getLogger(__name__)
 
 
-class WireGen(JvmToolTaskMixin, SimpleCodegenTask):
+class WireGen(NailgunTaskBase, SimpleCodegenTask):
 
   @classmethod
   def register_options(cls, register):
@@ -46,10 +46,6 @@ class WireGen(JvmToolTaskMixin, SimpleCodegenTask):
   def is_wire_compiler_jar(cls, jar):
     return 'com.squareup.wire' == jar.org and 'wire-compiler' == jar.name
 
-  @classmethod
-  def subsystem_dependencies(cls):
-    return super(WireGen, cls).subsystem_dependencies() + (DistributionLocator,)
-
   def __init__(self, *args, **kwargs):
     """Generates Java files from .proto files using the Wire protobuf compiler."""
     super(WireGen, self).__init__(*args, **kwargs)
@@ -69,10 +65,12 @@ class WireGen(JvmToolTaskMixin, SimpleCodegenTask):
     sources = OrderedSet(target.sources_relative_to_buildroot())
 
     relative_sources = OrderedSet()
+    source_roots = set()
     for source in sources:
       source_root = self.context.source_roots.find_by_path(source)
       if not source_root:
         source_root = self.context.source_roots.find(target)
+      source_roots.add(source_root.path)
       relative_source = os.path.relpath(source, source_root.path)
       relative_sources.add(relative_source)
 
@@ -100,19 +98,20 @@ class WireGen(JvmToolTaskMixin, SimpleCodegenTask):
     if target.payload.enum_options:
       args.append('--enum_options={0}'.format(','.join(target.payload.enum_options)))
 
-    args.append('--proto_path={0}'.format(os.path.join(get_buildroot(),
-        self.context.source_roots.find(target).path)))
+    for source_root in source_roots:
+      args.append('--proto_path={0}'.format(os.path.join(get_buildroot(), source_root)))
 
     args.extend(relative_sources)
     return args
 
   def execute_codegen(self, target, target_workdir):
-    execute_java = DistributionLocator.cached().execute_java
     args = self.format_args_for_target(target, target_workdir)
     if args:
-      result = execute_java(classpath=self.tool_classpath('wire-compiler'),
+      result = self.runjava(classpath=self.tool_classpath('wire-compiler'),
                             main='com.squareup.wire.WireCompiler',
-                            args=args)
+                            args=args,
+                            workunit_name='compile',
+                            workunit_labels=[WorkUnitLabel.TOOL])
       if result != 0:
         raise TaskError('Wire compiler exited non-zero ({0})'.format(result))
 

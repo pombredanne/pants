@@ -49,7 +49,8 @@ class BinaryCreateIntegrationTest(PantsRunIntegrationTest):
     self.build_and_run(
       pants_args=['bundle',
                   'testprojects/src/java/org/pantsbuild/testproject/manifest:manifest-app'],
-      rel_out_path=os.path.join('dist', 'manifest-app-bundle'),
+      rel_out_path=os.path.join('dist', ('testprojects.src.java.org.pantsbuild.testproject'
+                                         '.manifest.manifest-app-bundle')),
       java_args=['-cp', 'manifest-no-source.jar', 'org.pantsbuild.testproject.manifest.Manifest'],
       expected_output='Hello World!  Version: null',
     )
@@ -61,7 +62,8 @@ class BinaryCreateIntegrationTest(PantsRunIntegrationTest):
       pants_args=['bundle',
                   'testprojects/src/java/org/pantsbuild/testproject/manifest:manifest-app',
                   '--bundle-jvm-deployjar'],
-      rel_out_path=os.path.join('dist', 'manifest-app-bundle'),
+      rel_out_path=os.path.join('dist', ('testprojects.src.java.org.pantsbuild.testproject'
+                                         '.manifest.manifest-app-bundle')),
       java_args=['-cp', 'manifest-no-source.jar', 'org.pantsbuild.testproject.manifest.Manifest'],
       expected_output='Hello World!  Version: 4.5.6',
     )
@@ -69,7 +71,11 @@ class BinaryCreateIntegrationTest(PantsRunIntegrationTest):
   def test_deploy_excludes(self):
     jar_filename = os.path.join('dist', 'deployexcludes.jar')
     safe_delete(jar_filename)
-    command = ['binary', 'testprojects/src/java/org/pantsbuild/testproject/deployexcludes']
+    command = [
+      '--no-compile-zinc-capture-classpath',
+      'binary',
+      'testprojects/src/java/org/pantsbuild/testproject/deployexcludes',
+    ]
     with self.pants_results(command) as pants_run:
       self.assert_success(pants_run)
       # The resulting binary should not contain any guava classes
@@ -92,7 +98,7 @@ class BinaryCreateIntegrationTest(PantsRunIntegrationTest):
       # But adding back the deploy_excluded symbols should result in a clean run.
       classpath = [jar_filename,
                    os.path.join(pants_run.workdir,
-                                'ivy/jars/com.google.guava/guava/bundles/guava-18.0.jar')]
+                                'ivy/jars/com.google.guava/guava/jars/guava-18.0.jar')]
 
       self.run_java(java_args=['-cp', os.pathsep.join(classpath),
                                'org.pantsbuild.testproject.deployexcludes.DeployExcludesMain'],

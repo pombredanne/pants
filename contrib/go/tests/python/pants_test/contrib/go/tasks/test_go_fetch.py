@@ -13,7 +13,7 @@ from pants.build_graph.address import Address
 from pants.util.contextutil import temporary_dir
 from pants_test.tasks.task_test_base import TaskTestBase
 
-from pants.contrib.go.subsystems.fetchers import ArchiveFetcher, Fetchers
+from pants.contrib.go.subsystems.fetcher import ArchiveFetcher
 from pants.contrib.go.targets.go_remote_library import GoRemoteLibrary
 from pants.contrib.go.tasks.go_fetch import GoFetch
 
@@ -44,47 +44,35 @@ class GoFetchTest(TaskTestBase):
                                                           gopath=self.build_root)
     self.assertItemsEqual(remote_import_ids, ['bitbucket.org/u/b', 'github.com/u/c'])
 
-  def test_get_remote_import_paths_relative_ignored(self):
-    go_fetch = self.create_task(self.context())
-    self.create_file('src/github.com/u/r/a/a_test.go', contents="""
-      package a
-
-      import (
-        "fmt"
-        "math"
-        "sync"
-
-        "bitbucket.org/u/b"
-        "github.com/u/c"
-        "./b"
-        "../c/d"
-      )
-    """)
-    remote_import_ids = go_fetch._get_remote_import_paths('github.com/u/r/a',
-                                                          gopath=self.build_root)
-    self.assertItemsEqual(remote_import_ids, ['bitbucket.org/u/b', 'github.com/u/c'])
-
   def test_resolve_and_inject_explicit(self):
     r1 = self.make_target(spec='3rdparty/go/r1', target_type=GoRemoteLibrary)
     r2 = self.make_target(spec='3rdparty/go/r2', target_type=GoRemoteLibrary)
 
     go_fetch = self.create_task(self.context())
-    resolved = go_fetch._resolve(r1, self.address('3rdparty/go/r2'), 'r2', implict_ok=False)
+    resolved = go_fetch._resolve(r1, self.address('3rdparty/go/r2'), 'r2', implicit_ok=False)
     self.assertEqual(r2, resolved)
 
   def test_resolve_and_inject_explicit_failure(self):
     r1 = self.make_target(spec='3rdparty/go/r1', target_type=GoRemoteLibrary)
     go_fetch = self.create_task(self.context())
     with self.assertRaises(go_fetch.UndeclaredRemoteLibError) as cm:
-      go_fetch._resolve(r1, self.address('3rdparty/go/r2'), 'r2', implict_ok=False)
+      go_fetch._resolve(r1, self.address('3rdparty/go/r2'), 'r2', implicit_ok=False)
     self.assertEqual(cm.exception.address, self.address('3rdparty/go/r2'))
 
   def test_resolve_and_inject_implicit(self):
     r1 = self.make_target(spec='3rdparty/go/r1', target_type=GoRemoteLibrary)
     go_fetch = self.create_task(self.context())
-    r2 = go_fetch._resolve(r1, self.address('3rdparty/go/r2'), 'r2', implict_ok=True)
+    r2 = go_fetch._resolve(r1, self.address('3rdparty/go/r2'), 'r2', implicit_ok=True)
     self.assertEqual(self.address('3rdparty/go/r2'), r2.address)
     self.assertIsInstance(r2, GoRemoteLibrary)
+
+  def test_resolve_and_inject_implicit_already_exists(self):
+    r1 = self.make_target(spec='3rdparty/go/r1', target_type=GoRemoteLibrary)
+    self.make_target(spec='3rdparty/go/r2', target_type=GoRemoteLibrary)
+    go_fetch = self.create_task(self.context())
+    r2_resolved = go_fetch._resolve(r1, self.address('3rdparty/go/r2'), 'r2', implicit_ok=True)
+    self.assertEqual(self.address('3rdparty/go/r2'), r2_resolved.address)
+    self.assertIsInstance(r2_resolved, GoRemoteLibrary)
 
   def _create_package(self, dirpath, name, deps):
     """Creates a Go package inside dirpath named 'name' importing deps."""
@@ -116,11 +104,10 @@ class GoFetchTest(TaskTestBase):
 
   def _create_fetch_context(self, zipdir):
     """Given a directory of zipfiles, creates a context for GoFetch."""
-    self.set_options_for_scope('fetchers', mapping={r'.*': Fetchers.alias(ArchiveFetcher)})
     matcher = ArchiveFetcher.UrlInfo(url_format=os.path.join(zipdir, '\g<zip>.zip'),
                                      default_rev='HEAD',
                                      strip_level=0)
-    self.set_options_for_scope('archive-fetcher', matchers={r'localzip/(?P<zip>[^/]+)': matcher})
+    self.set_options_for_scope('go-fetchers', matchers={r'localzip/(?P<zip>[^/]+)': matcher})
     context = self.context()
     context.products.safe_create_data('go_remote_lib_src', lambda: defaultdict(str))
     return context
@@ -151,7 +138,9 @@ class GoFetchTest(TaskTestBase):
         }
         self._init_dep_graph_files(src, zipdir, dep_graph)
 
+        self.set_options_for_scope('source', source_roots={'3rdparty/go': ['go_remote']})
         r1 = self.target('3rdparty/go/localzip/r1')
+
         context = self._create_fetch_context(zipdir)
         go_fetch = self.create_task(context)
         undeclared_deps = go_fetch._transitive_download_remote_libs({r1})
@@ -171,6 +160,7 @@ class GoFetchTest(TaskTestBase):
         }
         self._init_dep_graph_files(src, zipdir, dep_graph)
 
+        self.set_options_for_scope('source', source_roots={'3rdparty/go': ['go_remote']})
         r1 = self.target('3rdparty/go/localzip/r1')
         r2 = self.target('3rdparty/go/localzip/r2')
 
@@ -192,6 +182,7 @@ class GoFetchTest(TaskTestBase):
         }
         self._init_dep_graph_files(src, zipdir, dep_graph)
 
+        self.set_options_for_scope('source', source_roots={'3rdparty/go': ['go_remote']})
         r1 = self.target('3rdparty/go/localzip/r1')
         r2 = self.target('3rdparty/go/localzip/r2')
 

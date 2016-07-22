@@ -16,7 +16,13 @@ class JavaLibrary(ExportableJvmLibrary):
   goal on this target creates a ``.jar``; but that's an unusual thing to do.
   Instead, a ``jvm_binary`` might depend on this library; that binary is a
   more sensible thing to bundle.
+
+  :API: public
   """
+
+  @classmethod
+  def subsystems(cls):
+    return super(JavaLibrary, cls).subsystems()
 
   def __init__(self, *args, **kwargs):
     """

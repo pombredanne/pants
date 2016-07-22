@@ -13,6 +13,8 @@ from collections import defaultdict
 from six.moves import range
 from twitter.common.collections import OrderedSet
 
+from pants.backend.jvm import argfile
+from pants.backend.jvm.subsystems.jvm_platform import JvmPlatform
 from pants.backend.jvm.subsystems.shader import Shader
 from pants.backend.jvm.targets.jar_dependency import JarDependency
 from pants.backend.jvm.targets.java_tests import JavaTests as junit_tests
@@ -22,14 +24,17 @@ from pants.backend.jvm.tasks.coverage.base import Coverage
 from pants.backend.jvm.tasks.coverage.cobertura import Cobertura, CoberturaTaskSettings
 from pants.backend.jvm.tasks.jvm_task import JvmTask
 from pants.backend.jvm.tasks.jvm_tool_task_mixin import JvmToolTaskMixin
+from pants.backend.jvm.tasks.reports.junit_html_report import JUnitHtmlReport
 from pants.base.build_environment import get_buildroot
 from pants.base.exceptions import TargetDefinitionException, TaskError, TestFailedTaskError
-from pants.base.revision import Revision
 from pants.base.workunit import WorkUnitLabel
-from pants.binaries import binary_util
+from pants.build_graph.target_scopes import Scopes
 from pants.java.distribution.distribution import DistributionLocator
 from pants.java.executor import SubprocessExecutor
 from pants.task.testrunner_task_mixin import TestRunnerTaskMixin
+from pants.util import desktop
+from pants.util.argutil import ensure_arg, remove_arg
+from pants.util.contextutil import environment_as
 from pants.util.strutil import pluralize
 from pants.util.xml_parser import XmlParser
 
@@ -57,6 +62,10 @@ def interpret_test_spec(test_spec):
 
 
 class JUnitRun(TestRunnerTaskMixin, JvmToolTaskMixin, JvmTask):
+  """
+  :API: public
+  """
+
   _MAIN = 'org.pantsbuild.tools.junit.ConsoleRunner'
 
   @classmethod
@@ -64,11 +73,16 @@ class JUnitRun(TestRunnerTaskMixin, JvmToolTaskMixin, JvmTask):
     super(JUnitRun, cls).register_options(register)
     register('--batch-size', advanced=True, type=int, default=sys.maxint,
              help='Run at most this many tests in a single test process.')
-    register('--test', action='append',
+    register('--test', type=list,
              help='Force running of just these tests.  Tests can be specified using any of: '
                   '[classname], [classname]#[methodname], [filename] or [filename]#[methodname]')
-    register('--per-test-timer', action='store_true', help='Show progress and timer for each test.')
-    register('--default-parallel', advanced=True, action='store_true',
+    register('--per-test-timer', type=bool, help='Show progress and timer for each test.')
+    register('--default-concurrency', advanced=True,
+             choices=junit_tests.VALID_CONCURRENCY_OPTS, default=junit_tests.CONCURRENCY_SERIAL,
+             help='Set the default concurrency mode for running tests not annotated with'
+                  ' @TestParallel or @TestSerial.')
+    register('--default-parallel', advanced=True, type=bool,
+             removal_hint='Use --default-concurrency instead.', removal_version='1.3.0',
              help='Run classes without @TestParallel or @TestSerial annotations in parallel.')
     register('--parallel-threads', advanced=True, type=int, default=0,
              help='Number of threads to run tests in parallel. 0 for autoset.')
@@ -83,20 +97,26 @@ class JUnitRun(TestRunnerTaskMixin, JvmToolTaskMixin, JvmTask):
     register('--cwd', advanced=True,
              help='Set the working directory. If no argument is passed, use the build root. '
                   'If cwd is set on a target, it will supersede this argument.')
-    register('--strict-jvm-version', action='store_true', default=False, advanced=True,
+    register('--strict-jvm-version', type=bool, advanced=True,
              help='If true, will strictly require running junits with the same version of java as '
                   'the platform -target level. Otherwise, the platform -target level will be '
                   'treated as the minimum jvm to run.')
-    register('--failure-summary', action='store_true', default=True,
+    register('--failure-summary', type=bool, default=True,
              help='If true, includes a summary of which test-cases failed at the end of a failed '
                   'junit run.')
-    register('--allow-empty-sources', action='store_true', default=False, advanced=True,
+    register('--allow-empty-sources', type=bool, advanced=True,
              help='Allows a junit_tests() target to be defined with no sources.  Otherwise,'
                   'such a target will raise an error during the test run.')
+    register('--use-experimental-runner', type=bool, advanced=True,
+             help='Use experimental junit-runner logic for more options for parallelism.')
+    register('--html-report', type=bool,
+             help='If true, generate an html summary report of tests that were run.')
+    register('--open', type=bool,
+             help='Attempt to open the html summary report in a browser (implies --html-report)')
     cls.register_jvm_tool(register,
                           'junit',
                           classpath=[
-                            JarDependency(org='org.pantsbuild', name='junit-runner', rev='1.0.0'),
+                            JarDependency(org='org.pantsbuild', name='junit-runner', rev='1.0.13'),
                           ],
                           main=JUnitRun._MAIN,
                           # TODO(John Sirois): Investigate how much less we can get away with.
@@ -157,6 +177,8 @@ class JUnitRun(TestRunnerTaskMixin, JvmToolTaskMixin, JvmTask):
     self._strict_jvm_version = options.strict_jvm_version
     self._args = copy.copy(self.args)
     self._failure_summary = options.failure_summary
+    self._open = options.open
+    self._html_report = self._open or options.html_report
 
     if options.output_mode == 'ALL':
       self._args.append('-output-mode=ALL')
@@ -169,11 +191,40 @@ class JUnitRun(TestRunnerTaskMixin, JvmToolTaskMixin, JvmTask):
       self._args.append('-fail-fast')
     self._args.append('-outdir')
     self._args.append(self.workdir)
-
     if options.per_test_timer:
       self._args.append('-per-test-timer')
+
     if options.default_parallel:
-      self._args.append('-default-parallel')
+      # TODO(zundel): Remove when --default_parallel finishes deprecation
+      if options.default_concurrency != junit_tests.CONCURRENCY_SERIAL:
+        self.context.log.warn('--default-parallel overrides --default-concurrency')
+      self._args.append('-default-concurrency')
+      self._args.append('PARALLEL_CLASSES')
+    else:
+      if options.default_concurrency == junit_tests.CONCURRENCY_PARALLEL_CLASSES_AND_METHODS:
+        if not options.use_experimental_runner:
+          self.context.log.warn(
+            '--default-concurrency=PARALLEL_CLASSES_AND_METHODS is experimental, use --use-experimental-runner.')
+        self._args.append('-default-concurrency')
+        self._args.append('PARALLEL_CLASSES_AND_METHODS')
+      elif options.default_concurrency == junit_tests.CONCURRENCY_PARALLEL_METHODS:
+        if not options.use_experimental_runner:
+          self.context.log.warn(
+            '--default-concurrency=PARALLEL_METHODS is experimental, use --use-experimental-runner.')
+        if options.test_shard:
+          # NB(zundel): The experimental junit runner doesn't support test sharding natively.  The
+          # legacy junit runner allows both methods and classes to run in parallel with this option.
+          self.context.log.warn(
+            '--default-concurrency=PARALLEL_METHODS with test sharding will run classes in parallel too.')
+        self._args.append('-default-concurrency')
+        self._args.append('PARALLEL_METHODS')
+      elif options.default_concurrency == junit_tests.CONCURRENCY_PARALLEL_CLASSES:
+        self._args.append('-default-concurrency')
+        self._args.append('PARALLEL_CLASSES')
+      elif options.default_concurrency == junit_tests.CONCURRENCY_SERIAL:
+        self._args.append('-default-concurrency')
+        self._args.append('SERIAL')
+
     self._args.append('-parallel-threads')
     self._args.append(str(options.parallel_threads))
 
@@ -181,29 +232,58 @@ class JUnitRun(TestRunnerTaskMixin, JvmToolTaskMixin, JvmTask):
       self._args.append('-test-shard')
       self._args.append(options.test_shard)
 
-    self._executor = None
+    if options.use_experimental_runner:
+      self.context.log.info('Using experimental junit-runner logic.')
+      self._args.append('-use-experimental-runner')
+
+  def classpath(self, targets, classpath_product=None):
+    return super(JUnitRun, self).classpath(targets, classpath_product=classpath_product,
+                                           include_scopes=Scopes.JVM_TEST_SCOPES)
 
   def preferred_jvm_distribution_for_targets(self, targets):
-    return self.preferred_jvm_distribution([target.platform for target in targets
-                                            if isinstance(target, JvmTarget)])
+    return JvmPlatform.preferred_jvm_distribution([target.platform for target in targets
+                                                  if isinstance(target, JvmTarget)],
+                                                  self._strict_jvm_version)
 
-  def preferred_jvm_distribution(self, platforms):
-    """Returns a jvm Distribution with a version that should work for all the platforms."""
-    if not platforms:
-      return DistributionLocator.cached()
-    min_version = max(platform.target_level for platform in platforms)
-    max_version = Revision(*(min_version.components + [9999])) if self._strict_jvm_version else None
-    return DistributionLocator.cached(minimum_version=min_version, maximum_version=max_version)
+  def _spawn(self, distribution, executor=None, *args, **kwargs):
+    """Returns a processhandler to a process executing java.
 
-  def execute_java_for_targets(self, targets, executor=None, *args, **kwargs):
+    :param Executor executor: the java subprocess executor to use. If not specified, construct
+      using the distribution.
+    :param Distribution distribution: The JDK or JRE installed.
+    :rtype: ProcessHandler
+    """
+
+    actual_executor = executor or SubprocessExecutor(distribution)
+    return distribution.execute_java_async(*args,
+                                           executor=actual_executor,
+                                           **kwargs)
+
+  def execute_java_for_targets(self, targets, *args, **kwargs):
+    """Execute java for targets using the test mixin spawn and wait.
+
+    Activates timeouts and other common functionality shared among tests.
+    """
+
     distribution = self.preferred_jvm_distribution_for_targets(targets)
-    self._executor = executor or SubprocessExecutor(distribution)
-    return distribution.execute_java(*args, executor=self._executor, **kwargs)
+    actual_executor = kwargs.get('executor') or SubprocessExecutor(distribution)
+    return self._spawn_and_wait(*args, executor=actual_executor, distribution=distribution, **kwargs)
+
+  def execute_java_for_coverage(self, targets, executor=None, *args, **kwargs):
+    """Execute java for targets directly and don't use the test mixin.
+
+    This execution won't be wrapped with timeouts and other testmixin code common
+    across test targets. Used for coverage instrumentation.
+    """
+
+    distribution = self.preferred_jvm_distribution_for_targets(targets)
+    actual_executor = executor or SubprocessExecutor(distribution)
+    return distribution.execute_java(*args, executor=actual_executor, **kwargs)
 
   def _collect_test_targets(self, targets):
-    """Returns a mapping from test names to target objects for all tests that
-    are included in targets. If self._tests_to_run is set, return {test: None}
-    for these tests instead.
+    """Returns a mapping from test names to target objects for all tests that are included in targets.
+
+    If self._tests_to_run is set, return {test: None} for these tests instead.
     """
 
     tests_from_targets = dict(list(self._calculate_tests_from_targets(targets)))
@@ -243,42 +323,46 @@ class JUnitRun(TestRunnerTaskMixin, JvmToolTaskMixin, JvmTask):
     :tests_and_targets: {test: target} mapping.
     """
 
-    def get_test_filename(test):
-      return os.path.join(self.workdir, 'TEST-{0}.xml'.format(test))
+    def get_test_filename(test_class_name):
+      return os.path.join(self.workdir, 'TEST-{0}.xml'.format(test_class_name.replace('$', '-')))
 
-    failed_targets = defaultdict(set)
-
+    xml_filenames_to_targets = defaultdict()
     for test, target in tests_and_targets.items():
       if target is None:
         self.context.log.warn('Unknown target for test %{0}'.format(test))
 
-      filename = get_test_filename(test)
+      # Look for a TEST-*.xml file that matches the classname or a containing classname
+      test_class_name = test
+      for _part in test.split('$'):
+        filename = get_test_filename(test_class_name)
+        if os.path.exists(filename):
+          xml_filenames_to_targets[filename] = target
+          break
+        else:
+          test_class_name = test_class_name.rsplit('$', 1)[0]
 
-      if os.path.exists(filename):
-        try:
-          xml = XmlParser.from_file(filename)
-          str_failures = xml.get_attribute('testsuite', 'failures')
-          int_failures = int(str_failures)
+    failed_targets = defaultdict(set)
+    for xml_filename, target in xml_filenames_to_targets.items():
+      try:
+        xml = XmlParser.from_file(xml_filename)
+        failures = int(xml.get_attribute('testsuite', 'failures'))
+        errors = int(xml.get_attribute('testsuite', 'errors'))
 
-          str_errors = xml.get_attribute('testsuite', 'errors')
-          int_errors = int(str_errors)
-
-          if target and (int_failures or int_errors):
-            for testcase in xml.parsed.getElementsByTagName('testcase'):
-              test_failed = testcase.getElementsByTagName('failure')
-              test_errored = testcase.getElementsByTagName('error')
-              if test_failed or test_errored:
-                failed_targets[target].add('{testclass}#{testname}'.format(
+        if target and (failures or errors):
+          for testcase in xml.parsed.getElementsByTagName('testcase'):
+            test_failed = testcase.getElementsByTagName('failure')
+            test_errored = testcase.getElementsByTagName('error')
+            if test_failed or test_errored:
+              failed_targets[target].add('{testclass}#{testname}'.format(
                   testclass=testcase.getAttribute('classname'),
                   testname=testcase.getAttribute('name'),
-                ))
-        except (XmlParser.XmlError, ValueError) as e:
-          self.context.log.error('Error parsing test result file {0}: {1}'.format(filename, e))
+              ))
+      except (XmlParser.XmlError, ValueError) as e:
+        self.context.log.error('Error parsing test result file {0}: {1}'.format(xml_filename, e))
 
     return dict(failed_targets)
 
   def _run_tests(self, tests_to_targets):
-
     if self._coverage:
       extra_jvm_options = self._coverage.extra_jvm_options
       classpath_prepend = self._coverage.classpath_prepend
@@ -288,46 +372,72 @@ class JUnitRun(TestRunnerTaskMixin, JvmToolTaskMixin, JvmTask):
       classpath_prepend = ()
       classpath_append = ()
 
-    tests_by_properties = self._tests_by_properties(tests_to_targets,
-                                                    self._infer_workdir,
-                                                    lambda target: target.test_platform)
+    tests_by_properties = self._tests_by_properties(
+      tests_to_targets,
+      self._infer_workdir,
+      lambda target: target.test_platform,
+      lambda target: target.payload.extra_jvm_options,
+      lambda target: target.payload.extra_env_vars,
+      lambda target: target.concurrency,
+      lambda target: target.threads
+    )
 
     # the below will be None if not set, and we'll default back to runtime_classpath
     classpath_product = self.context.products.get_data('instrument_classpath')
 
     result = 0
-    for (workdir, platform), tests in tests_by_properties.items():
-      for (target_jvm_options, target_tests) in self._partition_by_jvm_options(tests_to_targets,
-                                                                               tests):
-        for batch in self._partition(target_tests):
-          # Batches of test classes will likely exist within the same targets: dedupe them.
-          relevant_targets = set(map(tests_to_targets.get, batch))
-          complete_classpath = OrderedSet()
-          complete_classpath.update(classpath_prepend)
-          complete_classpath.update(self.tool_classpath('junit'))
-          complete_classpath.update(self.classpath(relevant_targets,
-                                                   classpath_product=classpath_product))
-          complete_classpath.update(classpath_append)
-          distribution = self.preferred_jvm_distribution([platform])
-          with binary_util.safe_args(batch, self.get_options()) as batch_tests:
-            self.context.log.debug('CWD = {}'.format(workdir))
-            self.context.log.debug('platform = {}'.format(platform))
-            self._executor = SubprocessExecutor(distribution)
-            result += abs(distribution.execute_java(
-              executor=self._executor,
+    for properties, tests in tests_by_properties.items():
+      (workdir, platform, target_jvm_options, target_env_vars, concurrency, threads) = properties
+      for batch in self._partition(tests):
+        # Batches of test classes will likely exist within the same targets: dedupe them.
+        relevant_targets = set(map(tests_to_targets.get, batch))
+        complete_classpath = OrderedSet()
+        complete_classpath.update(classpath_prepend)
+        complete_classpath.update(self.tool_classpath('junit'))
+        complete_classpath.update(self.classpath(relevant_targets,
+                                                 classpath_product=classpath_product))
+        complete_classpath.update(classpath_append)
+        distribution = JvmPlatform.preferred_jvm_distribution([platform], self._strict_jvm_version)
+
+        # Override cmdline args with values from junit_test() target that specify concurrency:
+        args = self._args + [u'-xmlreport']
+
+        if concurrency is not None:
+          args = remove_arg(args, '-default-parallel')
+          if concurrency == junit_tests.CONCURRENCY_SERIAL:
+            args = ensure_arg(args, '-default-concurrency', param='SERIAL')
+          elif concurrency == junit_tests.CONCURRENCY_PARALLEL_CLASSES:
+            args = ensure_arg(args, '-default-concurrency', param='PARALLEL_CLASSES')
+          elif concurrency == junit_tests.CONCURRENCY_PARALLEL_METHODS:
+            args = ensure_arg(args, '-default-concurrency', param='PARALLEL_METHODS')
+          elif concurrency == junit_tests.CONCURRENCY_PARALLEL_CLASSES_AND_METHODS:
+            args = ensure_arg(args, '-default-concurrency', param='PARALLEL_CLASSES_AND_METHODS')
+
+        if threads is not None:
+          args = remove_arg(args, '-parallel-threads', has_param=True)
+          args += ['-parallel-threads', str(threads)]
+
+        with argfile.safe_args(batch, self.get_options()) as batch_tests:
+          self.context.log.debug('CWD = {}'.format(workdir))
+          self.context.log.debug('platform = {}'.format(platform))
+          with environment_as(**dict(target_env_vars)):
+            result += abs(self._spawn_and_wait(
+              executor=SubprocessExecutor(distribution),
+              distribution=distribution,
               classpath=complete_classpath,
               main=JUnitRun._MAIN,
-              jvm_options=self.jvm_options + extra_jvm_options + target_jvm_options,
-              args=self._args + batch_tests + [u'-xmlreport'],
+              jvm_options=self.jvm_options + extra_jvm_options + list(target_jvm_options),
+              args=args + batch_tests,
               workunit_factory=self.context.new_workunit,
               workunit_name='run',
               workunit_labels=[WorkUnitLabel.TEST],
               cwd=workdir,
               synthetic_jar_dir=self.workdir,
+              create_synthetic_jar=self.synthetic_classpath,
             ))
 
-            if result != 0 and self._fail_fast:
-              break
+          if result != 0 and self._fail_fast:
+            break
 
     if result != 0:
       failed_targets_and_tests = self._get_failed_targets(tests_to_targets)
@@ -361,21 +471,6 @@ class JUnitRun(TestRunnerTaskMixin, JvmToolTaskMixin, JvmTask):
       return tuple(prop(target) for prop in properties)
 
     return self._tests_by_property(tests_to_targets, combined_property)
-
-  def _partition_by_jvm_options(self, tests_to_targets, tests):
-    """Partitions a list of tests by the jvm options to run them with.
-
-    :param dict tests_to_targets: A mapping from each test to its target.
-    :param list tests: The list of tests to run.
-    :returns: A list of tuples where the first element is an array of jvm options and the second
-      is a list of tests to run with the jvm options. Each test in tests will appear in exactly
-      one one tuple.
-    """
-    jvm_options_to_tests = defaultdict(list)
-    for test in tests:
-      extra_jvm_options = tests_to_targets[test].payload.extra_jvm_options
-      jvm_options_to_tests[extra_jvm_options].append(test)
-    return [(list(jvm_options), tests) for jvm_options, tests in jvm_options_to_tests.items()]
 
   def _partition(self, tests):
     stride = min(self._batch_size, len(tests))
@@ -432,20 +527,11 @@ class JUnitRun(TestRunnerTaskMixin, JvmToolTaskMixin, JvmTask):
       msg = 'JavaTests target must include a non-empty set of sources.'
       raise TargetDefinitionException(target, msg)
 
-  def _timeout_abort_handler(self):
-    """Kills the test run."""
-
-    # TODO(sameerbrenn): When we refactor the test code to be more standardized, rather than
-    #   storing the process handle here, the test mixin class will call the start_test() fn
-    #   on the language specific class which will return an object that can kill/monitor/etc
-    #   the test process.
-    if self._executor is not None:
-      self._executor.kill()
-
   def _execute(self, targets):
-    """
-    Implements the primary junit test execution. This method is called by the TestRunnerTaskMixin,
-    which contains the primary Task.execute function and wraps this method in timeouts.
+    """Implements the primary junit test execution.
+
+    This method is called by the TestRunnerTaskMixin, which contains the primary Task.execute function
+    and wraps this method in timeouts.
     """
 
     # We only run tests within java_tests/junit_tests targets.
@@ -461,20 +547,22 @@ class JUnitRun(TestRunnerTaskMixin, JvmToolTaskMixin, JvmTask):
     if not tests_and_targets:
       return
 
-    bootstrapped_cp = self.tool_classpath('junit')
-
     def compute_complete_classpath():
       return self.classpath(targets)
 
     self.context.release_lock()
     if self._coverage:
       self._coverage.instrument(
-        targets, tests_and_targets.keys(), compute_complete_classpath, self.execute_java_for_targets)
+        targets, tests_and_targets.keys(), compute_complete_classpath, self.execute_java_for_coverage)
 
     def _do_report(exception=None):
       if self._coverage:
         self._coverage.report(
-          targets, tests_and_targets.keys(), self.execute_java_for_targets, tests_failed_exception=exception)
+          targets, tests_and_targets.keys(), self.execute_java_for_coverage, tests_failed_exception=exception)
+      if self._html_report:
+        html_file_path = JUnitHtmlReport().report(self.workdir, os.path.join(self.workdir, 'reports'))
+        if self._open:
+          desktop.ui_open(html_file_path)
 
     try:
       self._run_tests(tests_and_targets)

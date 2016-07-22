@@ -15,10 +15,10 @@ from pants.backend.jvm.targets.jar_dependency import JarDependency
 from pants.backend.jvm.tasks.classpath_products import ClasspathProducts
 from pants.backend.jvm.tasks.ivy_task_mixin import IvyTaskMixin
 from pants.backend.jvm.tasks.nailgun_task import NailgunTask
-from pants.binaries import binary_util
+from pants.base.exceptions import TaskError
 from pants.invalidation.cache_manager import VersionedTargetSet
+from pants.util import desktop
 from pants.util.dirutil import safe_mkdir
-from pants.util.memo import memoized_property
 from pants.util.strutil import safe_shlex_split
 
 
@@ -27,7 +27,7 @@ class IvyResolve(IvyTaskMixin, NailgunTask):
   @classmethod
   def register_options(cls, register):
     super(IvyResolve, cls).register_options(register)
-    register('--override', action='append',
+    register('--override', type=list,
              fingerprint=True,
              help='Specifies a jar dependency override in the form: '
              '[org]#[name]=(revision|url) '
@@ -35,16 +35,16 @@ class IvyResolve(IvyTaskMixin, NailgunTask):
              'For example, to specify 2 overrides: '
              '--override=com.foo#bar=0.1.2 '
              '--override=com.baz#spam=file:///tmp/spam.jar ')
-    register('--report', action='store_true', default=False,
+    register('--report', type=bool,
              help='Generate an ivy resolve html report')
-    register('--open', action='store_true', default=False,
+    register('--open', type=bool,
              help='Attempt to open the generated ivy resolve report '
                   'in a browser (implies --report)')
     register('--outdir', help='Emit ivy report outputs in to this directory.')
-    register('--args', action='append',
+    register('--args', type=list,
              fingerprint=True,
              help='Pass these extra args to ivy.')
-    register('--confs', action='append', default=['default'],
+    register('--confs', type=list, default=['default'],
              help='Pass a configuration to ivy in addition to the default ones.')
     register('--mutable-pattern',
              fingerprint=True,
@@ -85,13 +85,19 @@ class IvyResolve(IvyTaskMixin, NailgunTask):
     targets = self.context.targets()
     compile_classpath = self.context.products.get_data('compile_classpath',
         init_func=ClasspathProducts.init_func(self.get_options().pants_workdir))
-    resolve_hash_name = self.resolve(executor=executor,
-                                     targets=targets,
-                                     classpath_products=compile_classpath,
-                                     confs=self.get_options().confs,
-                                     extra_args=self._args)
+    results = self.resolve(executor=executor,
+                                      targets=targets,
+                                      classpath_products=compile_classpath,
+                                      confs=self.get_options().confs,
+                                      extra_args=self._args)
     if self._report:
-      self._generate_ivy_report(resolve_hash_name)
+      results_with_resolved_artifacts = filter(lambda r: r.has_resolved_artifacts, results)
+
+      if not results_with_resolved_artifacts:
+        self.context.log.info("Not generating a report. No resolution performed.")
+      else:
+        for result in results_with_resolved_artifacts:
+          self._generate_ivy_report(result)
 
   def check_artifact_cache_for(self, invalidation_check):
     # Ivy resolution is an output dependent on the entire target set, and is not divisible
@@ -99,7 +105,7 @@ class IvyResolve(IvyTaskMixin, NailgunTask):
     global_vts = VersionedTargetSet.from_versioned_targets(invalidation_check.all_vts)
     return [global_vts]
 
-  def _generate_ivy_report(self, resolve_hash_name):
+  def _generate_ivy_report(self, result):
     def make_empty_report(report, organisation, module, conf):
       no_deps_xml_template = dedent("""<?xml version="1.0" encoding="UTF-8"?>
         <?xml-stylesheet type="text/xsl" href="ivy-report.xsl"?>
@@ -125,7 +131,7 @@ class IvyResolve(IvyTaskMixin, NailgunTask):
 
     report = None
     org = IvyUtils.INTERNAL_ORG_NAME
-    name = resolve_hash_name
+    name = result.resolve_hash_name
     xsl = os.path.join(self.ivy_cache_dir, 'ivy-report.xsl')
 
     # Xalan needs this dir to exist - ensure that, but do no more - we have no clue where this
@@ -133,7 +139,7 @@ class IvyResolve(IvyTaskMixin, NailgunTask):
     safe_mkdir(self._outdir, clean=False)
 
     for conf in self.get_options().confs:
-      xml_path = self._get_report_path(conf, resolve_hash_name)
+      xml_path = result.report_for_conf(conf)
       if not os.path.exists(xml_path):
         # Make it clear that this is not the original report from Ivy by changing its name.
         xml_path = xml_path[:-4] + "-empty.xml"
@@ -162,10 +168,7 @@ class IvyResolve(IvyTaskMixin, NailgunTask):
     shutil.copy(os.path.join(self.ivy_cache_dir, 'ivy-report.css'), self._outdir)
 
     if self._open and report:
-      binary_util.ui_open(report)
-
-  def _get_report_path(self, conf, resolve_hash_name):
-    try:
-      return IvyUtils.xml_report_path(self.ivy_cache_dir, resolve_hash_name, conf)
-    except IvyUtils.IvyResolveReportError as e:
-      raise self.Error('Failed to generate ivy report: {}'.format(e))
+      try:
+        desktop.ui_open(report)
+      except desktop.OpenError as e:
+        raise TaskError(e)

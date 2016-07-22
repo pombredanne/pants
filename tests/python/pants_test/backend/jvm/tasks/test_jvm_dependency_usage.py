@@ -6,14 +6,13 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
                         unicode_literals, with_statement)
 
 import os
-from collections import defaultdict
 
 from pants.backend.jvm.targets.java_library import JavaLibrary
 from pants.backend.jvm.tasks.classpath_products import ClasspathProducts
-from pants.backend.jvm.tasks.jvm_dependency_usage import JvmDependencyUsage
-from pants.goal.products import MultipleRootedProducts
+from pants.backend.jvm.tasks.jvm_dependency_analyzer import JvmDependencyAnalyzer
+from pants.backend.jvm.tasks.jvm_dependency_usage import DependencyUsageGraph, JvmDependencyUsage
 from pants.util.dirutil import safe_mkdir, touch
-from pants_test.tasks.task_test_base import TaskTestBase
+from pants_test.tasks.task_test_base import TaskTestBase, ensure_cached
 
 
 class TestJvmDependencyUsage(TaskTestBase):
@@ -62,7 +61,7 @@ class TestJvmDependencyUsage(TaskTestBase):
     product_deps_by_src[t3] = {'d.java': ['a.class', 'b.class'],
                                'e.java': ['a.class', 'b.class']}
 
-    graph = dep_usage.create_dep_usage_graph([t1, t2, t3], '')
+    graph = self.create_graph(dep_usage, [t1, t2, t3])
 
     self.assertEqual(graph._nodes[t1].products_total, 2)
     self.assertEqual(graph._nodes[t2].products_total, 1)
@@ -99,9 +98,96 @@ class TestJvmDependencyUsage(TaskTestBase):
     product_deps_by_src[t1_z] = {}
     product_deps_by_src[t2] = {'a.java': ['x1.class'],
                                'b.java': ['z1.class', 'z2.class']}
-    graph = dep_usage.create_dep_usage_graph([t1, t1_x, t1_y, t1_z, t2], '')
+    graph = self.create_graph(dep_usage, [t1, t1_x, t1_y, t1_z, t2])
 
     self.assertEqual(graph._nodes[t1].products_total, 5)
     self.assertEqual(len(graph._nodes[t2].dep_edges[t1].products_used), 3)
 
     self._cover_output(graph)
+
+  def test_target_alias(self):
+    a = self.make_java_target(spec=':a', sources=['a.java'])
+    b = self.make_java_target(spec=':b', sources=['b.java'])
+    alias_a_b = self.make_target(spec=':alias_a_b', dependencies=[a, b])
+    alias_b = self.make_target(spec=':alias_b', dependencies=[b])
+    nested_alias_b = self.make_target(spec=':nest_alias_b', dependencies=[alias_b])
+    c = self.make_java_target(spec=':c', sources=['c.java'], dependencies=[alias_a_b, nested_alias_b])
+    self.set_options(strict_deps=False)
+    dep_usage, product_deps_by_src = self._setup({
+      a: ['a.class'],
+      b: ['b.class'],
+      c: ['c.class'],
+    })
+
+    product_deps_by_src[c] = {'c.java': ['a.class']}
+    graph = self.create_graph(dep_usage, [a, b, c, alias_a_b, alias_b, nested_alias_b])
+    # both `:a` and `:b` are resolved from target aliases, one is used the other is not.
+    self.assertTrue(graph._nodes[c].dep_edges[a].is_declared)
+    self.assertEquals({'a.class'}, graph._nodes[c].dep_edges[a].products_used)
+    self.assertTrue(graph._nodes[c].dep_edges[b].is_declared)
+    self.assertEquals(set(), graph._nodes[c].dep_edges[b].products_used)
+
+    # With alias to its resolved targets mapping we can determine which aliases are unused.
+    # In this example `nested_alias_b` has none of its resolved dependencies being used.
+    # Also note when there are transitive aliases only top level alias `nested_alias_b` is saved.
+    self.assertEqual({alias_a_b}, graph._nodes[c].dep_aliases[a])
+    self.assertEqual({nested_alias_b, alias_a_b}, graph._nodes[c].dep_aliases[b])
+
+  def test_overlapping_globs(self):
+    t1 = self.make_java_target(spec=':t1', sources=['a.java'])
+    t2 = self.make_java_target(spec=':t2', sources=['a.java', 'b.java'])
+    t3 = self.make_java_target(spec=':t3', sources=['c.java'], dependencies=[t1])
+    t4 = self.make_java_target(spec=':t4', sources=['d.java'], dependencies=[t3])
+    self.set_options(strict_deps=False)
+    dep_usage, product_deps_by_src = self._setup({
+        t1: ['a.class'],
+        t2: ['a.class', 'b.class'],
+        t3: ['c.class'],
+        t4: ['d.class'],
+    })
+    product_deps_by_src[t3] = {'c.java': ['a.class']}
+    product_deps_by_src[t4] = {'d.java': ['a.class']}
+    graph = self.create_graph(dep_usage, [t1, t2, t3, t4])
+
+    # Not creating edge for t2 even it provides a.class that t4 depends on.
+    self.assertFalse(t2 in graph._nodes[t4].dep_edges)
+    # t4 depends on a.class from t1 transitively through t3.
+    self.assertEqual({'a.class'}, graph._nodes[t4].dep_edges[t1].products_used)
+    self.assertFalse(graph._nodes[t4].dep_edges[t1].is_declared)
+    self.assertEqual(set(), graph._nodes[t4].dep_edges[t3].products_used)
+    self.assertTrue(graph._nodes[t4].dep_edges[t3].is_declared)
+
+  def create_graph(self, task, targets):
+    classes_by_source = task.context.products.get_data('classes_by_source')
+    runtime_classpath = task.context.products.get_data('runtime_classpath')
+    product_deps_by_src = task.context.products.get_data('product_deps_by_src')
+    analyzer = JvmDependencyAnalyzer('', runtime_classpath, product_deps_by_src)
+    targets_by_file = analyzer.targets_by_file(targets)
+    transitive_deps_by_target = analyzer.compute_transitive_deps_by_target(targets)
+
+    def node_creator(target):
+      transitive_deps = set(transitive_deps_by_target.get(target))
+      return task.create_dep_usage_node(target,
+                                        analyzer,
+                                        classes_by_source,
+                                        targets_by_file,
+                                        transitive_deps)
+
+    return DependencyUsageGraph(task.create_dep_usage_nodes(targets, node_creator),
+                                task.size_estimators[task.get_options().size_estimator])
+
+  @ensure_cached(JvmDependencyUsage, expected_num_artifacts=2)
+  def test_cache_write(self):
+    t1 = self.make_java_target(spec=':t1', sources=['a.java'])
+    self.create_file('a.java')
+    t2 = self.make_java_target(spec=':t2', sources=['b.java'], dependencies=[t1])
+    self.create_file('b.java')
+    self.set_options(size_estimator='filecount')
+    dep_usage, product_deps_by_src = self._setup({
+        t1: ['a.class'],
+        t2: ['b.class'],
+      })
+    product_deps_by_src[t1] = {}
+    product_deps_by_src[t2] = {'b.java': ['a.class']}
+
+    dep_usage.create_dep_usage_graph([t1, t2])

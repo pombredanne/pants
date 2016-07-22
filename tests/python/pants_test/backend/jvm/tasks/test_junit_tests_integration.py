@@ -103,29 +103,15 @@ class JunitTestsIntegrationTest(PantsRunIntegrationTest):
         '--jvm-test-junit-options=-Dcwd.test.enabled=true'])
     self.assert_failure(pants_run)
 
-  def test_junit_test_output_flag(self):
-    def run_test(output_mode):
-      args = ['test.junit', '--no-test-junit-fail-fast']
-      if output_mode is not None:
-        args.append('--output-mode=' + output_mode)
-      args.append('testprojects/src/java/org/pantsbuild/testproject/junit/suppressoutput:tests')
-      return self.run_pants(args)
-
-    run_with_all_output = run_test('ALL')
-    self.assertIn('Failure output', run_with_all_output.stdout_data)
-    self.assertIn('Success output', run_with_all_output.stdout_data)
-
-    run_with_failure_only_output = run_test('FAILURE_ONLY')
-    self.assertIn('Failure output', run_with_failure_only_output.stdout_data)
-    self.assertNotIn('Success output', run_with_failure_only_output.stdout_data)
-
-    run_with_none_output = run_test('NONE')
-    self.assertNotIn('Failure output', run_with_none_output)
-    self.assertNotIn('Success output', run_with_none_output)
-
-    run_with_default_output = run_test(None)
-    self.assertNotIn('Failure output', run_with_default_output)
-    self.assertNotIn('Success output', run_with_default_output)
+  def test_junit_test_early_exit(self):
+    pants_run = self.run_pants([
+      'test',
+      'testprojects/src/java/org/pantsbuild/testproject/junit/earlyexit:tests',
+    ])
+    self.assert_failure(pants_run)
+    self.assertIn('java.lang.UnknownError: Abnormal VM exit - test crashed.', pants_run.stdout_data)
+    self.assertIn('Tests run: 0,  Failures: 1', pants_run.stdout_data)
+    self.assertIn('FATAL: VM exiting unexpectedly.', pants_run.stdout_data)
 
   def test_junit_test_target_cwd(self):
     pants_run = self.run_pants([
@@ -213,8 +199,13 @@ class JunitTestsIntegrationTest(PantsRunIntegrationTest):
           'org.pantsbuild.tmp.tests.AllTests#test1Failure',
           'org.pantsbuild.tmp.tests.AllTests#test3Failure',
           'org.pantsbuild.tmp.tests.AllTests#test4Error',
+          'org.pantsbuild.tmp.tests.InnerClassTests$InnerClassFailureTest#testInnerFailure',
+          'org.pantsbuild.tmp.tests.InnerClassTests$InnerInnerTest$InnerFailureTest#testFailure'
         ]
         output = '\n'.join(line.strip() for line in pants_run.stdout_data.split('\n'))
         self.assertIn('\n'.join(group), output,
                       '{group}\n not found in\n\n{output}.'.format(group='\n'.join(group),
                                                                    output=output))
+        self.assertNotIn('org.pantsbuild.tmp.tests.AllTests#test2Success', output)
+        self.assertNotIn('org.pantsbuild.tmp.tests.AllTestsBase', output)
+        self.assertNotIn('org.pantsbuild.tmp.tests.AllTests$InnerClassSuccessTest', output)

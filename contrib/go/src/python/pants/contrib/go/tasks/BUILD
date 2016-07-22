@@ -3,11 +3,13 @@ target(
   dependencies=[
     ':go_binary_create',
     ':go_buildgen',
+    ':go_checkstyle',
     ':go_compile',
     ':go_fetch',
     ':go_go',
     ':go_run',
     ':go_test',
+    ':go_thrift_gen',
   ]
 )
 
@@ -26,7 +28,7 @@ python_library(
   name='go_buildgen',
   sources=['go_buildgen.py'],
   dependencies=[
-    'contrib/go/src/python/pants/contrib/go/subsystems:fetchers',
+    'contrib/go/src/python/pants/contrib/go/subsystems',
     'contrib/go/src/python/pants/contrib/go/targets:go_binary',
     'contrib/go/src/python/pants/contrib/go/targets:go_library',
     'contrib/go/src/python/pants/contrib/go/targets:go_local_source',
@@ -40,6 +42,17 @@ python_library(
     'src/python/pants/util:contextutil',
     'src/python/pants/util:dirutil',
     'src/python/pants/util:memo',
+  ]
+)
+
+python_library(
+  name='go_checkstyle',
+  sources=['go_checkstyle.py'],
+  dependencies=[
+    'contrib/go/src/python/pants/contrib/go/tasks:go_workspace_task',
+    'src/python/pants/base:exceptions',
+    'src/python/pants/base:workunit',
+    'src/python/pants/util:dirutil',
   ]
 )
 
@@ -58,7 +71,7 @@ python_library(
   name='go_fetch',
   sources=['go_fetch.py'],
   dependencies=[
-    'contrib/go/src/python/pants/contrib/go/subsystems:fetchers',
+    'contrib/go/src/python/pants/contrib/go/subsystems',
     'contrib/go/src/python/pants/contrib/go/targets:go_remote_library',
     'contrib/go/src/python/pants/contrib/go/tasks:go_task',
     'src/python/pants/base:exceptions',
@@ -94,12 +107,12 @@ python_library(
   name='go_task',
   sources=['go_task.py'],
   dependencies=[
-    'contrib/go/src/python/pants/contrib/go/subsystems:fetchers',
-    'contrib/go/src/python/pants/contrib/go/subsystems:go_distribution',
+    'contrib/go/src/python/pants/contrib/go/subsystems',
     'contrib/go/src/python/pants/contrib/go/targets:go_binary',
     'contrib/go/src/python/pants/contrib/go/targets:go_library',
     'contrib/go/src/python/pants/contrib/go/targets:go_local_source',
     'contrib/go/src/python/pants/contrib/go/targets:go_remote_library',
+    'contrib/go/src/python/pants/contrib/go/targets:go_target',
     'src/python/pants/task',
     'src/python/pants/util:memo',
   ]
@@ -112,6 +125,25 @@ python_library(
     'contrib/go/src/python/pants/contrib/go/tasks:go_workspace_task',
     'src/python/pants/base:exceptions',
     'src/python/pants/base:workunit',
+  ]
+)
+
+python_library(
+  name='go_thrift_gen',
+  sources=['go_thrift_gen.py'],
+  dependencies=[
+    'contrib/go/src/python/pants/contrib/go/targets:go_library',
+    'contrib/go/src/python/pants/contrib/go/targets:go_remote_library',
+    'contrib/go/src/python/pants/contrib/go/targets:go_thrift_library',
+    'src/python/pants/backend/codegen/subsystems:thrift_defaults',
+    'src/python/pants/backend/codegen/tasks:simple_codegen_task',
+    'src/python/pants/base:build_environment',
+    'src/python/pants/base:exceptions',
+    'src/python/pants/base:workunit',
+    'src/python/pants/binaries:thrift_util',
+    'src/python/pants/option',
+    'src/python/pants/util:dirutil',
+    'src/python/pants/util:memo',
   ]
 )
 

@@ -12,7 +12,7 @@ from twitter.common.collections.orderedset import OrderedSet
 
 from pants.base.exceptions import TaskError
 from pants.base.workunit import WorkUnit, WorkUnitLabel
-from pants.engine.engine import Engine
+from pants.engine.legacy_engine import Engine
 from pants.engine.round_manager import RoundManager
 
 
@@ -54,6 +54,9 @@ class GoalExecutor(object):
 
 
 class RoundEngine(Engine):
+  """
+  :API: public
+  """
   class DependencyError(ValueError):
     """Indicates a Task has an unsatisfiable data dependency."""
 
@@ -199,6 +202,9 @@ class RoundEngine(Engine):
       yield GoalExecutor(context, goal_info.goal, goal_info.tasktypes_by_name)
 
   def attempt(self, context, goals):
+    """
+    :API: public
+    """
     goal_executors = list(self._prepare(context, goals))
     execution_goals = ' -> '.join(e.goal.name for e in goal_executors)
     context.log.info('Executing tasks in goals: {goals}'.format(goals=execution_goals))

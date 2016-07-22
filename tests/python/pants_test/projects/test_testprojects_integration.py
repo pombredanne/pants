@@ -30,25 +30,30 @@ class TestProjectsIntegrationTest(ProjectIntegrationTest):
 
     # Targets that are intended to fail
     negative_test_targets = [
+      'testprojects/maven_layout/provided_patching/leaf:fail',
       'testprojects/src/antlr/pants/backend/python/test:antlr_failure',
       'testprojects/src/java/org/pantsbuild/testproject/bundle:missing-files',
       'testprojects/src/java/org/pantsbuild/testproject/compilation_warnings:fatal',
-      'testprojects/src/java/org/pantsbuild/testproject/cycle1',
-      'testprojects/src/java/org/pantsbuild/testproject/cycle2',
       'testprojects/src/java/org/pantsbuild/testproject/dummies:compilation_failure_target',
+      'testprojects/src/java/org/pantsbuild/testproject/junit/earlyexit:tests',
       'testprojects/src/java/org/pantsbuild/testproject/junit/failing/tests/org/pantsbuild/tmp/tests',
       'testprojects/src/java/org/pantsbuild/testproject/junit/mixed/tests/org/pantsbuild/tmp/tests',
-      'testprojects/src/java/org/pantsbuild/testproject/junit/suppressoutput',
       'testprojects/src/java/org/pantsbuild/testproject/missingdepswhitelist.*',
+      'testprojects/src/java/org/pantsbuild/testproject/missingdirectdepswhitelist:missingdirectdepswhitelist',
+      'testprojects/src/java/org/pantsbuild/testproject/missingjardepswhitelist:missingjardepswhitelist',
       'testprojects/src/python/antlr:test_antlr_failure',
       'testprojects/src/scala/org/pantsbuild/testproject/compilation_failure',
       'testprojects/src/scala/org/pantsbuild/testproject/compilation_warnings:fatal',
       'testprojects/src/thrift/org/pantsbuild/thrift_linter:',
+      'testprojects/src/java/org/pantsbuild/testproject/provided:c',
       'testprojects/tests/java/org/pantsbuild/testproject/dummies:failing_target',
       'testprojects/tests/java/org/pantsbuild/testproject/empty:',
       'testprojects/tests/python/pants/dummies:failing_target',
-      'testprojects/src/java/org/pantsbuild/testproject/missingjardepswhitelist:missingjardepswhitelist',
-      'testprojects/src/java/org/pantsbuild/testproject/missingdirectdepswhitelist:missingdirectdepswhitelist',
+      # These don't pass without special config.
+      'testprojects/tests/java/org/pantsbuild/testproject/depman:new-tests',
+      'testprojects/tests/java/org/pantsbuild/testproject/depman:old-tests',
+      'testprojects/tests/java/org/pantsbuild/testproject/htmlreport:htmlreport',
+      'testprojects/tests/java/org/pantsbuild/testproject/parallel.*',
     ]
 
     # May not succeed without java8 installed
@@ -63,10 +68,19 @@ class TestProjectsIntegrationTest(ProjectIntegrationTest):
     # because they take a long time to run.
     timeout_targets = [
       'testprojects/tests/python/pants/timeout:sleeping_target',
-      'testprojects/tests/java/org/pantsbuild/testproject/timeout:sleeping_target'
+      'testprojects/tests/java/org/pantsbuild/testproject/timeout:sleeping_target',
+       # Called with test_pytest_run_integration
+      'testprojects/tests/python/pants/timeout:exceeds_timeout',
+      'testprojects/tests/python/pants/timeout:ignores_terminate',
     ]
 
-    targets_to_exclude = known_failing_targets + negative_test_targets + need_java_8 + timeout_targets
-    exclude_opts = map(lambda target: '--exclude-target-regexp={}'.format(target), targets_to_exclude)
+    deliberately_conflicting_targets = [
+      'testprojects/src/python/interpreter_selection.*'
+    ]
+
+    targets_to_exclude = (known_failing_targets + negative_test_targets + need_java_8 +
+                          timeout_targets + deliberately_conflicting_targets)
+    exclude_opts = map(lambda target: '--exclude-target-regexp={}'.format(target),
+                       targets_to_exclude)
     pants_run = self.pants_test(['testprojects::'] + exclude_opts)
     self.assert_success(pants_run)

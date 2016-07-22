@@ -6,18 +6,21 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
                         unicode_literals, with_statement)
 
 import json
+import re
 import subprocess
 from collections import namedtuple
 
 from pants.base.workunit import WorkUnit, WorkUnitLabel
 from pants.task.task import Task
 from pants.util.memo import memoized_method, memoized_property
+from twitter.common.collections.orderedset import OrderedSet
 
 from pants.contrib.go.subsystems.go_distribution import GoDistribution
 from pants.contrib.go.targets.go_binary import GoBinary
 from pants.contrib.go.targets.go_library import GoLibrary
 from pants.contrib.go.targets.go_local_source import GoLocalSource
 from pants.contrib.go.targets.go_remote_library import GoRemoteLibrary
+from pants.contrib.go.targets.go_target import GoTarget
 
 
 class GoTask(Task):
@@ -44,7 +47,7 @@ class GoTask(Task):
 
   @staticmethod
   def is_go(target):
-    return isinstance(target, (GoLocalSource, GoRemoteLibrary))
+    return isinstance(target, GoTarget)
 
   @memoized_property
   def go_dist(self):
@@ -92,6 +95,15 @@ class ImportOracle(object):
     out = self._go_dist.create_go_cmd('list', args=['std']).check_output()
     return frozenset(out.strip().split())
 
+  # This simple regex mirrors the behavior of the relevant go code in practice (see
+  # repoRootForImportDynamic and surrounding code in
+  # https://github.com/golang/go/blob/7bc40ffb05d8813bf9b41a331b45d37216f9e747/src/cmd/go/vcs.go).
+  _remote_import_re = re.compile('[^.]+(?:\.[^.]+)+\/')
+
+  def is_remote_import(self, import_path):
+    """Whether the specified import_path denotes a remote import."""
+    return self._remote_import_re.match(import_path) is not None
+
   def is_go_internal_import(self, import_path):
     """Return `True` if the given import path will be satisfied directly by the Go distribution.
 
@@ -105,7 +117,10 @@ class ImportOracle(object):
     #   http://blog.golang.org/c-go-cgo
     return import_path == 'C' or import_path in self.go_stdlib
 
-  class ImportListing(namedtuple('ImportListing', ['pkg_name', 'imports', 'test_imports'])):
+  class ImportListing(namedtuple('ImportListing', ['pkg_name',
+                                                   'imports',
+                                                   'test_imports',
+                                                   'x_test_imports'])):
     """Represents all the imports of a given package."""
 
     @property
@@ -114,7 +129,7 @@ class ImportOracle(object):
 
       :rtype: list of string
       """
-      return self.imports + self.test_imports
+      return list(OrderedSet(self.imports + self.test_imports + self.x_test_imports))
 
   @memoized_method
   def list_imports(self, pkg, gopath=None):
@@ -139,6 +154,15 @@ class ImportOracle(object):
         raise self.ListDepsError('Problem listing imports for {}: {} failed with exit code {}'
                                  .format(pkg, go_cmd, returncode))
       data = json.loads(out)
+
+      # XTestImports are for black box tests.  These test files live inside the package dir but
+      # declare a different package and thus can only access the public members of the package's
+      # production code.  This style of test necessarily means the test file will import the main
+      # package.  For pants, this would lead to a cyclic self-dependency, so we omit the main
+      # package as implicitly included as its own dependency.
+      x_test_imports = [i for i in data.get('XTestImports', []) if i != pkg]
+
       return self.ImportListing(pkg_name=data.get('Name'),
                                 imports=data.get('Imports', []),
-                                test_imports=data.get('TestImports', []))
+                                test_imports=data.get('TestImports', []),
+                                x_test_imports=x_test_imports)

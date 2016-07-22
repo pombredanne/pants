@@ -75,19 +75,24 @@ class CacheCompileIntegrationTest(BaseCompileIT):
       self.run_compile(cachetest_spec, config, workdir)
 
       root = os.path.join(workdir, 'compile', 'zinc')
-      # One target.
-      self.assertEqual(len(os.listdir(root)), 1)
-      target_workdir_root = os.path.join(root, os.listdir(root)[0])
+
+      versioned_root = os.path.join(root, os.listdir(root)[0])
+      self.assertEqual(len(os.listdir(root)), 1, 'Expected 1 task version.')
+
+      target_root = os.path.join(root, os.listdir(root)[0])
+      self.assertEqual(len(os.listdir(target_root)), 1, 'Expected 1 target.')
+
+      target_workdir_root = os.path.join(versioned_root, os.listdir(versioned_root)[0])
       target_workdirs = os.listdir(target_workdir_root)
-      # Two workdirs.
-      self.assertEqual(len(target_workdirs), 2)
+      self.assertEqual(len(target_workdirs), 3, 'Expected 3 workdirs (current, and two versioned).')
+      self.assertIn('current', target_workdirs)
 
       def classfiles(d):
         cd = os.path.join(target_workdir_root, d, 'classes', 'org', 'pantsbuild', 'cachetest')
         return sorted(os.listdir(cd))
 
       # One workdir should contain NotMain, and the other should contain Main.
-      self.assertEquals(sorted(classfiles(w) for w in target_workdirs),
+      self.assertEquals(sorted(classfiles(w) for w in target_workdirs if w != 'current'),
                         sorted([['A.class', 'Main.class'], ['A.class', 'NotMain.class']]))
 
   def test_incremental_caching(self):
@@ -143,3 +148,7 @@ class CacheCompileIntegrationTest(BaseCompileIT):
         # Compile, and confirm that we have the right count of artifacts.
         self.run_compile(spec, complete_config(c.config), workdir)
         self.assertEquals(c.artifact_count, len(os.listdir(artifact_dir)))
+
+
+class CacheCompileIntegrationWithZjarsTest(CacheCompileIntegrationTest):
+  _EXTRA_TASK_ARGS = ['--compile-zinc-use-classpath-jars']

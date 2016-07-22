@@ -55,6 +55,9 @@ class LinkifyTest(unittest.TestCase):
     ensure_file_exists(path)
     self._do_test_linkify('/browse/{}'.format(relpath), relpath)
 
+  def test_linkify_relative_path_outside_buildroot(self):
+    self._do_test_not_linkified('../definitely/outside/baz')
+
   def test_linkify_non_existent_relative_paths(self):
     relpath = 'underscore_and.dot/and-dash/baz'
 
@@ -89,3 +92,11 @@ class LinkifyTest(unittest.TestCase):
     memo = {}
     self._do_test_linkify(url, url, memo)
     self.assertEqual(url, memo[url])
+
+  # Technically, if there's a file named ....., we should linkify it.
+  # This is thus not actually verifying desired behavior. However,
+  # this seems the most reasonable way to verify that linkify does
+  # not go crazy on dots, as described in linkify.py.
+  def test_linkify_ignore_many_dots(self):
+    url = '.....'
+    self._do_test_not_linkified(url)

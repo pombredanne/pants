@@ -5,8 +5,6 @@
 from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
                         unicode_literals, with_statement)
 
-from textwrap import dedent
-
 from pants_test.pants_run_integration_test import PantsRunIntegrationTest
 
 
@@ -39,4 +37,16 @@ class NodeTestIntegrationTest(PantsRunIntegrationTest):
                'contrib/node/examples/src/node/preinstalled-project:unit']
     pants_run = self.run_pants(command=command)
 
+    self.assert_success(pants_run)
+
+  def test_test_passthru_args(self):
+    command = ['-q',
+               'test',
+               'contrib/node/examples/src/node/server-project:checkarg',
+               '--']
+
+    pants_run = self.run_pants(command=command + ['incorrect'])
+    self.assert_failure(pants_run)
+
+    pants_run = self.run_pants(command=command + ['correct'])
     self.assert_success(pants_run)

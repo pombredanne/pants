@@ -25,6 +25,7 @@ class ChunkType(object):
   ENVIRONMENT = b'E'
   WORKING_DIR = b'D'
   COMMAND = b'C'
+  PID = b'P'  # This is a custom extension to the Nailgun protocol spec for transmitting pid info.
   STDIN = b'0'
   STDOUT = b'1'
   STDERR = b'2'
@@ -32,7 +33,7 @@ class ChunkType(object):
   STDIN_EOF = b'.'
   EXIT = b'X'
   REQUEST_TYPES = (ARGUMENT, ENVIRONMENT, WORKING_DIR, COMMAND)
-  EXECUTION_TYPES = (STDIN, STDOUT, STDERR, START_READING_INPUT, STDIN_EOF, EXIT)
+  EXECUTION_TYPES = (PID, STDIN, STDOUT, STDERR, START_READING_INPUT, STDIN_EOF, EXIT)
   VALID_TYPES = REQUEST_TYPES + EXECUTION_TYPES
 
 
@@ -61,9 +62,9 @@ class NailgunProtocol(object):
   """
 
   ENVIRON_SEP = '='
+  TTY_ENV_TMPL = 'NAILGUN_TTY_{}'
   HEADER_FMT = b'>Ic'
   HEADER_BYTES = 5
-  READ_BYTES = 8192
 
   class ProtocolError(Exception):
     """Raised if there is an error in the underlying nailgun protocol."""
@@ -78,13 +79,20 @@ class NailgunProtocol(object):
     """Raised if there is a socket error while reading the payload bytes."""
 
   @classmethod
+  def _decode_unicode_seq(cls, seq):
+    for item in seq:
+      yield item.decode('utf-8')
+
+  @classmethod
   def send_request(cls, sock, working_dir, command, *arguments, **environment):
     """Send the initial Nailgun request over the specified socket."""
     for argument in arguments:
       cls.write_chunk(sock, ChunkType.ARGUMENT, argument)
 
     for item_tuple in environment.items():
-      cls.write_chunk(sock, ChunkType.ENVIRONMENT, cls.ENVIRON_SEP.join(item_tuple))
+      cls.write_chunk(sock,
+                      ChunkType.ENVIRONMENT,
+                      cls.ENVIRON_SEP.join(cls._decode_unicode_seq(item_tuple)))
 
     cls.write_chunk(sock, ChunkType.WORKING_DIR, working_dir)
     cls.write_chunk(sock, ChunkType.COMMAND, command)
@@ -110,7 +118,7 @@ class NailgunProtocol(object):
       if chunk_type == ChunkType.ARGUMENT:
         arguments.append(payload)
       elif chunk_type == ChunkType.ENVIRONMENT:
-        key, val = payload.split(cls.ENVIRON_SEP)
+        key, val = payload.split(cls.ENVIRON_SEP, 1)
         environment[key] = val
       elif chunk_type == ChunkType.WORKING_DIR:
         working_dir = payload
@@ -151,7 +159,7 @@ class NailgunProtocol(object):
     return buf
 
   @classmethod
-  def read_chunk(cls, sock):
+  def read_chunk(cls, sock, return_bytes=False):
     """Read a single chunk from the connected client.
 
      A "chunk" is a variable-length block of data beginning with a 5-byte chunk header and followed
@@ -181,14 +189,16 @@ class NailgunProtocol(object):
     # we've drained the payload from the socket to avoid subsequent reads of a stale payload.
     if chunk_type not in ChunkType.VALID_TYPES:
       raise cls.ProtocolError('invalid chunk type: {}'.format(chunk_type))
+    if not return_bytes:
+      payload = payload.decode('utf-8')
 
     return chunk_type, payload
 
   @classmethod
-  def iter_chunks(cls, sock):
+  def iter_chunks(cls, sock, return_bytes=False):
     """Generates chunks from a connected socket until an Exit chunk is sent."""
     while 1:
-      chunk_type, payload = cls.read_chunk(sock)
+      chunk_type, payload = cls.read_chunk(sock, return_bytes)
       yield chunk_type, payload
       if chunk_type == ChunkType.EXIT:
         break
@@ -213,8 +223,22 @@ class NailgunProtocol(object):
     """Send the Exit chunk over the specified socket."""
     cls.write_chunk(sock, ChunkType.EXIT, payload)
 
-  @staticmethod
-  def isatty_from_env(env):
+  @classmethod
+  def isatty_to_env(cls, stdin, stdout, stderr):
+    """Generate nailgun tty capability environment variables based on checking a set of fds.
+
+    :param file stdin: The stream to check for stdin tty capabilities.
+    :param file stdout: The stream to check for stdout tty capabilities.
+    :param file stderr: The stream to check for stderr tty capabilities.
+    :returns: A dict containing the tty capability environment variables.
+    """
+    fds = (stdin, stdout, stderr)
+    return {
+      cls.TTY_ENV_TMPL.format(fd_id): bytes(int(fd.isatty())) for fd_id, fd in enumerate(fds)
+    }
+
+  @classmethod
+  def isatty_from_env(cls, env):
     """Determine whether remote file descriptors are tty capable using std nailgunned env variables.
 
     :param dict env: A dictionary representing the environment.
@@ -223,4 +247,4 @@ class NailgunProtocol(object):
     def str_int_bool(i):
       return i.isdigit() and bool(int(i))  # Environment variable values should always be strings.
 
-    return tuple(str_int_bool(env.get('NAILGUN_TTY_{}'.format(fd_id), '0')) for fd_id in range(3))
+    return tuple(str_int_bool(env.get(cls.TTY_ENV_TMPL.format(fd_id), '0')) for fd_id in range(3))

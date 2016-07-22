@@ -10,18 +10,22 @@ import os
 import shutil
 from collections import defaultdict
 
+from pathspec import PathSpec
+from pathspec.gitignore import GitIgnorePattern
 from twitter.common.collections.orderedset import OrderedSet
 
+from pants.backend.jvm.subsystems.scala_platform import ScalaPlatform
 from pants.backend.jvm.targets.annotation_processor import AnnotationProcessor
 from pants.backend.jvm.targets.scala_library import ScalaLibrary
 from pants.backend.jvm.tasks.classpath_products import ClasspathProducts
 from pants.backend.jvm.tasks.ivy_task_mixin import IvyTaskMixin
 from pants.backend.jvm.tasks.nailgun_task import NailgunTask
 from pants.base.build_environment import get_buildroot
+from pants.base.build_file import BuildFile
 from pants.base.exceptions import TaskError
-from pants.binaries import binary_util
 from pants.build_graph.address import BuildFileAddress
 from pants.build_graph.resources import Resources
+from pants.util import desktop
 from pants.util.dirutil import safe_mkdir, safe_walk
 
 
@@ -45,6 +49,10 @@ def is_java(target):
 class IdeGen(IvyTaskMixin, NailgunTask):
 
   @classmethod
+  def subsystem_dependencies(cls):
+    return super(IdeGen, cls).subsystem_dependencies() + (ScalaPlatform, )
+
+  @classmethod
   def register_options(cls, register):
     super(IdeGen, cls).register_options(register)
     register('--project-name', default='project',
@@ -56,54 +64,58 @@ class IdeGen(IvyTaskMixin, NailgunTask):
                   'processes it launches.  Note that specifying this trumps --{0}-project-dir '
                   'and not all project related files will be stored there.'
                   .format(cls.options_scope))
-    register('--intransitive', action='store_true', default=False,
+    register('--intransitive', type=bool,
              help='Limits the sources included in the generated project to just '
                   'those owned by the targets specified on the command line.')
-    register('--python', action='store_true', default=False,
+    register('--python', type=bool,
              help='Adds python support to the generated project configuration.')
-    register('--java', action='store_true', default=True,
+    register('--java', type=bool, default=True,
              help='Includes java sources in the project; otherwise compiles them and adds them '
                   'to the project classpath.')
-    register('--java-language-level', type=int, default=7,
+    register('--java-language-level', type=int, default=8,
              help='Sets the java language and jdk used to compile the project\'s java sources.')
     register('--java-jdk-name', default=None,
              help='Sets the jdk used to compile the project\'s java sources. If unset the default '
                   'jdk name for the --java-language-level is used')
-    register('--scala', action='store_true', default=True,
+    register('--scala', type=bool, default=True,
              help='Includes scala sources in the project; otherwise compiles them and adds them '
                   'to the project classpath.')
-    register('--use-source-root', action='store_true', default=False,
+    register('--use-source-root', type=bool,
              help='Use source roots to collapse sourcepaths in project and determine '
                   'which paths are used for tests.  This is usually what you want if your repo '
                   ' uses a maven style directory layout.')
     register('--debug_port', type=int, default=5005,
              help='Port to use for launching tasks under the debugger.')
-    register('--source-jars', action='store_true', default=True,
+    register('--source-jars', type=bool, default=True,
              help='Pull source jars from external dependencies into the project.')
-    register('--javadoc-jars', action='store_true', default=True,
+    register('--javadoc-jars', type=bool, default=True,
              help='Pull javadoc jars from external dependencies into the project')
 
     # Options intended to be configured primarily in pants.ini
-    register('--python_source_paths', action='append', advanced=True,
+    register('--python_source_paths', type=list, advanced=True,
              help='Always add these paths to the IDE as Python sources.')
-    register('--python_test_paths', action='append', advanced=True,
+    register('--python_test_paths', type=list, advanced=True,
              help='Always add these paths to the IDE as Python test sources.')
-    register('--python_lib_paths', action='append', advanced=True,
+    register('--python_lib_paths', type=list, advanced=True,
              help='Always add these paths to the IDE for Python libraries.')
-    register('--extra-jvm-source-paths', action='append', advanced=True,
+    register('--extra-jvm-source-paths', type=list, advanced=True,
              help='Always add these paths to the IDE for Java sources.')
-    register('--extra-jvm-test-paths', action='append', advanced=True,
+    register('--extra-jvm-test-paths', type=list, advanced=True,
              help='Always add these paths to the IDE for Java test sources.')
 
   @classmethod
   def prepare(cls, options, round_manager):
     super(IdeGen, cls).prepare(options, round_manager)
+    # We optional_product() instead of require() because there's no guarantee
+    # that anything produces these products (typically only codegen produces them,
+    # because checked-in sources aren't considered products, at least in the old engine).
+    # See https://github.com/pantsbuild/pants/issues/3560.
     if options.python:
-      round_manager.require('python')
+      round_manager.optional_product('python')
     if options.java:
-      round_manager.require('java')
+      round_manager.optional_product('java')
     if options.scala:
-      round_manager.require('scala')
+      round_manager.optional_product('scala')
 
   class Error(TaskError):
     """IdeGen Error."""
@@ -167,8 +179,7 @@ class IdeGen(IvyTaskMixin, NailgunTask):
     self.resolve(executor=executor,
                  targets=targets,
                  classpath_products=compile_classpath,
-                 confs=confs,
-                 extra_args=())
+                 confs=confs)
     return compile_classpath
 
   def _prepare_project(self):
@@ -183,6 +194,8 @@ class IdeGen(IvyTaskMixin, NailgunTask):
                    isinstance(t, Resources)]
     if self.intransitive:
       jvm_targets = set(self.context.target_roots).intersection(jvm_targets)
+
+    build_ignore_patterns = self.context.options.for_global_scope().ignore_patterns or []
     project = Project(self.project_name,
                       self.python,
                       self.skip_java,
@@ -194,7 +207,7 @@ class IdeGen(IvyTaskMixin, NailgunTask):
                       jvm_targets,
                       not self.intransitive,
                       self.TargetUtil(self.context),
-                      self.context.options.for_global_scope().spec_excludes)
+                      PathSpec.from_lines(GitIgnorePattern, build_ignore_patterns))
 
     if self.python:
       python_source_paths = self.get_options().python_source_paths
@@ -339,7 +352,7 @@ class IdeGen(IvyTaskMixin, NailgunTask):
     if self.skip_scala:
       scalac_classpath = []
     else:
-      scalac_classpath = self.tool_classpath('scalac', scope='scala-platform')
+      scalac_classpath = ScalaPlatform.global_instance().compiler_classpath(self.context.products)
 
     self._project.set_tool_classpaths(checkstyle_classpath, scalac_classpath)
     self.map_internal_jars(targets)
@@ -347,7 +360,10 @@ class IdeGen(IvyTaskMixin, NailgunTask):
 
     idefile = self.generate_project(self._project)
     if idefile:
-      binary_util.ui_open(idefile)
+      try:
+        desktop.ui_open(idefile)
+      except desktop.OpenError as e:
+        raise TaskError(e)
 
   def generate_project(self, project):
     raise NotImplementedError('Subclasses must generate a project for an ide')
@@ -450,7 +466,7 @@ class Project(object):
     return collapsed_source_sets
 
   def __init__(self, name, has_python, skip_java, skip_scala, use_source_root, root_dir,
-               debug_port, context, targets, transitive, target_util, spec_excludes):
+               debug_port, context, targets, transitive, target_util, build_ignore_patterns=None):
     """Creates a new, unconfigured, Project based at root_dir and comprised of the sources visible
     to the given targets."""
     self.context = context
@@ -476,7 +492,7 @@ class Project(object):
 
     self.internal_jars = OrderedSet()
     self.external_jars = OrderedSet()
-    self.spec_excludes = spec_excludes
+    self.build_ignore_patterns = build_ignore_patterns
 
   def configure_python(self, source_paths, test_paths, lib_paths):
     self.py_sources.extend(SourceSet(get_buildroot(), root, None) for root in source_paths)
@@ -588,13 +604,17 @@ class Project(object):
         target_dirset = find_source_basedirs(target)
         if not isinstance(target.address, BuildFileAddress):
           return []  # Siblings only make sense for BUILD files.
-        candidates = self.target_util.get_all_addresses(target.address.build_file)
-        for ancestor in target.address.build_file.ancestors():
-          candidates.update(self.target_util.get_all_addresses(ancestor))
-        for sibling in target.address.build_file.siblings():
-          candidates.update(self.target_util.get_all_addresses(sibling))
-        for descendant in target.address.build_file.descendants(spec_excludes=self.spec_excludes):
+        candidates = OrderedSet()
+        build_file = target.address.build_file
+        dir_relpath = os.path.dirname(build_file.relpath)
+        for descendant in BuildFile.scan_build_files(build_file.project_tree, dir_relpath,
+                                                     build_ignore_patterns=self.build_ignore_patterns):
           candidates.update(self.target_util.get_all_addresses(descendant))
+        if not self._is_root_relpath(dir_relpath):
+          ancestors = self._collect_ancestor_build_files(build_file.project_tree, os.path.dirname(dir_relpath),
+                                                         self.build_ignore_patterns)
+          for ancestor in ancestors:
+            candidates.update(self.target_util.get_all_addresses(ancestor))
 
         def is_sibling(target):
           return source_target(target) and target_dirset.intersection(find_source_basedirs(target))
@@ -683,3 +703,16 @@ class Project(object):
   def set_tool_classpaths(self, checkstyle_classpath, scalac_classpath):
     self.checkstyle_classpath = checkstyle_classpath
     self.scala_compiler_classpath = scalac_classpath
+
+  @classmethod
+  def _collect_ancestor_build_files(cls, project_tree, dir_relpath, build_ignore_patterns):
+    for build_file in BuildFile.get_build_files_family(project_tree, dir_relpath, build_ignore_patterns):
+      yield build_file
+    while not cls._is_root_relpath(dir_relpath):
+      dir_relpath = os.path.dirname(dir_relpath)
+      for build_file in BuildFile.get_build_files_family(project_tree, dir_relpath, build_ignore_patterns):
+        yield build_file
+
+  @classmethod
+  def _is_root_relpath(cls, relpath):
+    return relpath == '.' or relpath == ''

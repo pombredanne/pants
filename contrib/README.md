@@ -38,7 +38,7 @@ Contrib plugins should generally follow 3 basic setup steps:
    This involves 2 edits to `pants.ini`.  You'll need to add one entry in each of the
    `pythonpath` and `backend_packages` lists:
    ```ini
-   [DEFAULT]
+   [GLOBAL]
    # Enable our own custom loose-source plugins as well as contribs.
    pythonpath: [
        "%(buildroot)s/pants-plugins/src/python",
@@ -99,7 +99,7 @@ Contrib plugins should generally follow 3 basic setup steps:
    )
    ```
    NB: The act of releasing your contrib distribution is part of of the normal `pantsbuild.pants`
-   [release process](https://pantsbuild.github.io/howto_contribute.html).  You may need to request
+   [release process](https://pantsbuild.org/howto_contribute.html).  You may need to request
    a release from the owners if you have a change that should be fast-tracked before the next
    `pantsbuild.pants` release.  You can always test that your contrib distribution works though by
    doing a release dry run:

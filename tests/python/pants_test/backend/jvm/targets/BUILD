@@ -2,10 +2,20 @@
 # Licensed under the Apache License, Version 2.0 (see LICENSE).
 
 python_tests(
+  name='credentials',
+  sources=['test_credentials.py'],
+  dependencies=[
+    'src/python/pants/backend/jvm/targets:jvm',
+    'tests/python/pants_test:base_test',
+  ]
+)
+
+python_tests(
   name='jar_dependency',
   sources=['test_jar_dependency.py'],
   dependencies=[
     'src/python/pants/backend/jvm/targets:jvm',
+    'src/python/pants/backend/jvm/targets:scala',
   ]
 )
 
@@ -20,13 +30,24 @@ python_tests(
 )
 
 python_tests(
+  name='java_tests',
+  sources=['test_java_tests.py'],
+  dependencies=[
+    'src/python/pants/backend/jvm/targets:jvm',
+    'src/python/pants/build_graph',
+    'tests/python/pants_test:base_test',
+  ],
+)
+
+python_tests(
   name='jvm_app',
   sources=['test_jvm_app.py'],
   dependencies=[
-    'src/python/pants/backend/core:wrapped_globs',
     'src/python/pants/backend/jvm/targets:jvm',
     'src/python/pants/base:exceptions',
+    'src/python/pants/base:parse_context',
     'src/python/pants/build_graph',
+    'src/python/pants/source',
     'tests/python/pants_test:base_test',
   ]
 )

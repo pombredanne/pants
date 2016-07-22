@@ -16,19 +16,27 @@ from pants.backend.jvm.targets.scala_jar_dependency import ScalaJarDependency
 from pants.backend.jvm.tasks.bootstrap_jvm_tools import BootstrapJvmTools
 from pants.base.build_environment import get_pants_cachedir
 from pants.build_graph.build_file_aliases import BuildFileAliases
+from pants.build_graph.target import Target
 from pants.ivy.bootstrapper import Bootstrapper
 from pants_test.jvm.jvm_task_test_base import JvmTaskTestBase
 
 
 class JvmToolTaskTestBase(JvmTaskTestBase):
-  """Prepares an ephemeral test build root that supports tasks that use jvm tool bootstrapping."""
+  """Prepares an ephemeral test build root that supports tasks that use jvm tool bootstrapping.
+
+  :API: public
+  """
 
   @property
   def alias_groups(self):
+    """
+    :API: public
+    """
     # Aliases appearing in our real BUILD.tools.
     return BuildFileAliases(
       targets={
         'jar_library': JarLibrary,
+        'target': Target,
       },
       objects={
         'exclude': Exclude,
@@ -38,6 +46,9 @@ class JvmToolTaskTestBase(JvmTaskTestBase):
     )
 
   def setUp(self):
+    """
+    :API: public
+    """
     super(JvmToolTaskTestBase, self).setUp()
 
     # Use a synthetic subclass for proper isolation when bootstrapping within the test.
@@ -75,6 +86,9 @@ class JvmToolTaskTestBase(JvmTaskTestBase):
 
   def context(self, for_task_types=None, options=None, passthru_args=None, target_roots=None,
               console_outstream=None, workspace=None, for_subsystems=None):
+    """
+    :API: public
+    """
     # Add in the bootstrapper task type, so its options get registered and set.
     for_task_types = [self.bootstrap_task_type] + (for_task_types or [])
     return super(JvmToolTaskTestBase, self).context(for_task_types=for_task_types,
@@ -90,6 +104,8 @@ class JvmToolTaskTestBase(JvmTaskTestBase):
 
     Note: Other task pre-requisites will not be ensured and tests must instead setup their own
           product requirements if any.
+
+    :API: public
 
     :returns: The prepared Task instance.
     """
@@ -111,6 +127,8 @@ class JvmToolTaskTestBase(JvmTaskTestBase):
 
     Note: Other task pre-requisites will not be ensured and tests must instead setup their own
           product requirements if any.
+
+    :API: public
 
     :returns: The Task instance that was executed.
     """

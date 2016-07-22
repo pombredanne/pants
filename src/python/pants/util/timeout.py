@@ -5,8 +5,6 @@
 from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
                         unicode_literals, with_statement)
 
-import sys
-import thread
 import threading
 
 
@@ -47,13 +45,8 @@ class Timeout(object):
       self._timer.start()
 
   def __exit__(self, type_, value, traceback):
-    """If triggered, raise TimeoutReached.
+    """If triggered, raise TimeoutReached."""
 
-    Rather than converting a KeyboardInterrupt to TimeoutReached here, we just check self._triggered,
-    which helps us in the case where the thread we are trying to timeout isn't the main thread. Of
-    course in that case the executing doesn't get interrupted at the appropriate time, but at least
-    the exception still gets raised.
-    """
     if self._triggered:
       raise TimeoutReached(self._seconds)
 

@@ -7,14 +7,14 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 
 from collections import namedtuple
 
-from pants.option.custom_types import dict_option, list_option
-from pants.option.option_util import is_boolean_flag
+from pants.base import deprecated
+from pants.option.option_util import is_list_option
 
 
 class OptionHelpInfo(namedtuple('_OptionHelpInfo',
     ['registering_class', 'display_args', 'scoped_cmd_line_args', 'unscoped_cmd_line_args',
-     'typ', 'fromfile', 'default', 'help', 'deprecated_version', 'deprecated_message',
-     'deprecated_hint', 'choices'])):
+     'typ', 'fromfile', 'default', 'help', 'deprecated_message', 'removal_version',
+     'removal_hint', 'choices'])):
   """A container for help information for a single option.
 
   registering_class: The type that registered the option.
@@ -28,12 +28,15 @@ class OptionHelpInfo(namedtuple('_OptionHelpInfo',
   fromfile: `True` if the option supports @fromfile value loading.
   default: The value of this option if no flags are specified (derived from config and env vars).
   help: The help message registered for this option.
-  deprecated_version: The version at which this option is to be removed, if any (None otherwise).
-  deprecated_message: A more verbose message explaining the deprecated_version (None otherwise).
-  deprecated_hint: A deprecation hint message registered for this option (None otherwise).
+  deprecated_message: If deprecated: A message explaining that this option is deprecated at
+                      removal_version.
+  removal_version: If deprecated: The version at which this option is to be removed.
+  removal_hint: If deprecated: The removal hint message registered for this option.
   choices: If this option has a constrained list of choices, a csv list of the choices.
   """
-  pass
+
+  def comma_separated_display_args(self):
+    return ', '.join(self.display_args)
 
 
 class OptionScopeHelpInfo(namedtuple('_OptionScopeHelpInfo',
@@ -61,23 +64,22 @@ class HelpInfoExtracter(object):
   def compute_default(kwargs):
     """Compute the default value to display in help for an option registered with these kwargs."""
     ranked_default = kwargs.get('default')
-    action = kwargs.get('action')
     typ = kwargs.get('type', str)
 
     default = ranked_default.value if ranked_default else None
     if default is None:
-      if action == 'store_true':
-        return 'False'
-      elif action == 'store_false':
-        return 'True'
-      else:
-        return 'None'
+      return 'None'
 
-    if typ == list_option:
+    if typ == list:
       default_str = '[{}]'.format(','.join(["'{}'".format(s) for s in default]))
-    elif typ == dict_option:
-      default_str = '{{ {} }}'.format(
-        ','.join(["'{}':'{}'".format(k, v) for k, v in default.items()]))
+    elif typ == dict:
+      if default:
+        default_str = '{{ {} }}'.format(
+          ','.join(["'{}':'{}'".format(k, v) for k, v in default.items()]))
+      else:
+        default_str = '{}'
+    elif typ == str:
+      default_str = "'{}'".format(default).replace('\n', ' ')
     else:
       default_str = str(default)
     return default_str
@@ -85,13 +87,13 @@ class HelpInfoExtracter(object):
   @staticmethod
   def compute_metavar(kwargs):
     """Compute the metavar to display in help for an option registered with these kwargs."""
-    action = kwargs.get('action')
     metavar = kwargs.get('metavar')
     if not metavar:
       typ = kwargs.get('type', str)
-      if typ == list_option:
-        metavar = '"[\'str1\',\'str2\',...]"'
-      elif typ == dict_option:
+      if typ == list:
+        typ = kwargs.get('member_type', str)
+
+      if typ == dict:
         metavar = '"{\'key1\':val1,\'key2\':val2,...}"'
       else:
         metavar = '<{}>'.format(typ.__name__)
@@ -137,29 +139,40 @@ class HelpInfoExtracter(object):
         scoped_arg = arg
       scoped_cmd_line_args.append(scoped_arg)
 
-      if is_boolean_flag(kwargs):
+      if kwargs.get('type') == bool:
         if is_short_arg:
-          display_arg = scoped_arg
+          display_args.append(scoped_arg)
         else:
           unscoped_cmd_line_args.append('--no-{}'.format(arg[2:]))
           scoped_cmd_line_args.append('--no-{}'.format(scoped_arg[2:]))
-          display_arg = '--[no-]{}'.format(scoped_arg[2:])
+          display_args.append('--[no-]{}'.format(scoped_arg[2:]))
       else:
-        display_arg = '{}={}'.format(scoped_arg, self.compute_metavar(kwargs))
-        if kwargs.get('action') == 'append':
-          display_arg = '{arg_str} ({arg_str}) ...'.format(arg_str=display_arg)
-      display_args.append(display_arg)
+        metavar = self.compute_metavar(kwargs)
+        display_arg = '{}={}'.format(scoped_arg, metavar)
+        if is_list_option(kwargs):
+          # Show the multi-arg append form.
+          display_args.append('{arg_str} ({arg_str}) ...'.format(arg_str=display_arg))
+          # Also show the list literal form, both with and without the append operator.
+          if metavar.startswith('"') and metavar.endswith('"'):
+            # We quote the entire list literal, so we shouldn't quote the individual members.
+            metavar = metavar[1:-1]
+          display_args.append('{arg}="[{metavar}, {metavar}, ...]"'.format(arg=scoped_arg,
+                                                                           metavar=metavar))
+          display_args.append('{arg}="+[{metavar}, {metavar}, ...]"'.format(arg=scoped_arg,
+                                                                            metavar=metavar))
+        else:
+          display_args.append(display_arg)
 
-    if is_boolean_flag(kwargs):
-      typ = bool
-    else:
-      typ = kwargs.get('type', str)
+    typ = kwargs.get('type', str)
     default = self.compute_default(kwargs)
     help_msg = kwargs.get('help', 'No help available.')
-    deprecated_version = kwargs.get('deprecated_version')
-    deprecated_message = ('DEPRECATED. Will be removed in version {}.'.format(deprecated_version)
-                          if deprecated_version else None)
-    deprecated_hint = kwargs.get('deprecated_hint')
+    removal_version = kwargs.get('removal_version')
+    deprecated_message = None
+    if removal_version:
+      deprecated_tense = deprecated.get_deprecated_tense(removal_version)
+      deprecated_message = 'DEPRECATED. {} removed in version: {}'.format(deprecated_tense,
+                                                                          removal_version)
+    removal_hint = kwargs.get('removal_hint')
     choices = ', '.join(kwargs.get('choices')) if kwargs.get('choices') else None
 
     ret = OptionHelpInfo(registering_class=kwargs.get('registering_class', type(None)),
@@ -170,8 +183,8 @@ class HelpInfoExtracter(object):
                          fromfile=kwargs.get('fromfile', False),
                          default=default,
                          help=help_msg,
-                         deprecated_version=deprecated_version,
                          deprecated_message=deprecated_message,
-                         deprecated_hint=deprecated_hint,
+                         removal_version=removal_version,
+                         removal_hint=removal_hint,
                          choices=choices)
     return ret

@@ -10,7 +10,6 @@ from pants.option.arg_splitter import GLOBAL_SCOPE
 
 class OptionsError(Exception):
   """An options system-related error."""
-  pass
 
 
 class RegistrationError(OptionsError):
@@ -24,7 +23,6 @@ class RegistrationError(OptionsError):
 
 class ParseError(OptionsError):
   """An error at flag parsing time."""
-  pass
 
 
 # Subclasses of RegistrationError. The distinction between them is useful mainly for testing
@@ -37,15 +35,17 @@ def mk_registration_error(msg):
   return Anon
 
 
-BooleanOptionImplicitVal = mk_registration_error('Boolean option cannot specify an implicit value.')
 BooleanOptionNameWithNo = mk_registration_error('Boolean option names cannot start with --no.')
-BooleanOptionType = mk_registration_error('Boolean option cannot specify a type.')
 FrozenRegistration = mk_registration_error('Cannot register an option on a scope after registering '
                                            'on any of its inner scopes.')
 ImplicitValIsNone = mk_registration_error('Implicit value cannot be None.')
-InvalidAction = mk_registration_error('Invalid action {action}.')
 InvalidKwarg = mk_registration_error('Invalid registration kwarg {kwarg}.')
+InvalidMemberType = mk_registration_error('member_type {member_type} not allowed.')
+MemberTypeNotAllowed = mk_registration_error('member_type not allowed on option with type {type_}. '
+                                             'It may only be specified if type=list.')
 NoOptionNames = mk_registration_error('No option names provided.')
+OptionAlreadyRegistered = mk_registration_error('An option with this name was already registered '
+                                                'on this scope.')
 OptionNameDash = mk_registration_error('Option name must begin with a dash.')
 OptionNameDoubleDash = mk_registration_error('Long option name must begin with a double-dash.')
 RecursiveSubsystemOption = mk_registration_error("Subsystem option cannot specify 'recursive'. "

@@ -7,6 +7,7 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 
 import functools
 import inspect
+from contextlib import contextmanager
 
 
 # Used as a sentinel that disambiguates tuples passed in *args from coincidentally matching tuples
@@ -49,12 +50,17 @@ def memoized(func=None, key_factory=equal_args, cache_factory=dict):
   so care must be taken to only apply this decorator to functions with single threaded access and
   an expected reasonably small set of unique call parameters.
 
-  Note that the wrapped function comes equipped with 2 helper function attributes:
+  Note that the wrapped function comes equipped with 3 helper function attributes:
 
+  + `put(*args, **kwargs)`: A context manager that takes the same arguments as the memoized
+                            function and yields a setter function to set the value in the
+                            memoization cache.
   + `forget(*args, **kwargs)`: Takes the same arguments as the memoized function and causes the
                                memoization cache to forget the computed value, if any, for those
                                arguments.
   + `clear()`: Causes the memoization cache to be fully cleared.
+
+  :API: public
 
   :param func: The function to wrap.  Only generally passed by the python runtime and should be
                omitted when passing a custom `key_factory` or `cache_factory`.
@@ -96,6 +102,12 @@ def memoized(func=None, key_factory=equal_args, cache_factory=dict):
     memoized_results[key] = result
     return result
 
+  @contextmanager
+  def put(*args, **kwargs):
+    key = key_func(*args, **kwargs)
+    yield functools.partial(memoized_results.__setitem__, key)
+  memoize.put = put
+
   def forget(*args, **kwargs):
     key = key_func(*args, **kwargs)
     if key in memoized_results:
@@ -131,6 +143,8 @@ def memoized_method(func=None, key_factory=per_instance, **kwargs):
   ...   @memoized(key_factory=per_instance)
   ...   def name(self):
   ...     pass
+
+  :API: public
 
   :param func: The function to wrap.  Only generally passed by the python runtime and should be
                omitted when passing a custom `key_factory` or `cache_factory`.
@@ -194,6 +208,8 @@ def memoized_property(func=None, key_factory=per_instance, **kwargs):
   1433267424.056189
   >>>
 
+  :API: public
+
   :param func: The property getter method to wrap.  Only generally passed by the python runtime and
                should be omitted when passing a custom `key_factory` or `cache_factory`.
   :param key_factory: A function that can form a cache key from the arguments passed to the
@@ -205,3 +221,16 @@ def memoized_property(func=None, key_factory=per_instance, **kwargs):
   """
   getter = memoized_method(func=func, key_factory=key_factory, **kwargs)
   return property(fget=getter, fdel=lambda self: getter.forget(self))
+
+
+def testable_memoized_property(func=None, key_factory=per_instance, **kwargs):
+  """A variant of `memoized_property` that allows for setting of properties (for tests, etc)."""
+  getter = memoized_method(func=func, key_factory=key_factory, **kwargs)
+
+  def setter(self, val):
+    with getter.put(self) as putter:
+      putter(val)
+
+  return property(fget=getter,
+                  fset=setter,
+                  fdel=lambda self: getter.forget(self))

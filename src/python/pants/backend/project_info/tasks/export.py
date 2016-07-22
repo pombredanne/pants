@@ -13,7 +13,6 @@ import six
 from pex.pex_info import PexInfo
 from twitter.common.collections import OrderedSet
 
-from pants.backend.jvm.ivy_utils import IvyModuleRef
 from pants.backend.jvm.jar_dependency_utils import M2Coordinate
 from pants.backend.jvm.subsystems.jvm_platform import JvmPlatform
 from pants.backend.jvm.targets.jar_library import JarLibrary
@@ -37,7 +36,7 @@ from pants.util.memo import memoized_property
 
 
 # Changing the behavior of this task may affect the IntelliJ Pants plugin.
-# Please add fkorotkov, tdesai to reviews for this file.
+# Please add tdesai to reviews for this file.
 class ExportTask(IvyTaskMixin, PythonTask):
   """Base class for generating a json-formattable blob of data about the target graph.
 
@@ -54,9 +53,9 @@ class ExportTask(IvyTaskMixin, PythonTask):
   # Patch version x.x.1 : Increment this field when a minor format change that just adds information
   #   that an application can safely ignore.
   #
-  # Note format changes in src/python/pants/docs/export.md and update the Changelog section.
+  # Note format changes in src/docs/export.md and update the Changelog section.
   #
-  DEFAULT_EXPORT_VERSION = '1.0.4'
+  DEFAULT_EXPORT_VERSION = '1.0.9'
 
   @classmethod
   def subsystem_dependencies(cls):
@@ -97,14 +96,19 @@ class ExportTask(IvyTaskMixin, PythonTask):
   @classmethod
   def register_options(cls, register):
     super(ExportTask, cls).register_options(register)
-    register('--libraries', default=True, action='store_true',
+    register('--libraries', default=True, type=bool,
              help='Causes libraries to be output.')
-    register('--libraries-sources', default=False, action='store_true',
+    register('--libraries-sources', type=bool,
              help='Causes libraries with sources to be output.')
-    register('--libraries-javadocs', default=False, action='store_true',
+    register('--libraries-javadocs', type=bool,
              help='Causes libraries with javadocs to be output.')
-    register('--sources', default=False, action='store_true',
+    register('--sources', type=bool,
              help='Causes sources to be output.')
+    # Required by IvyTaskMixin.
+    # TODO: Remove this once IvyTaskMixin registers an --ivy-jvm-options option.
+    # See also https://github.com/pantsbuild/pants/issues/3200.
+    register('--jvm-options', type=list, metavar='<option>...',
+             help='Run Ivy with these extra jvm options.')
 
   @classmethod
   def prepare(cls, options, round_manager):
@@ -123,9 +127,22 @@ class ExportTask(IvyTaskMixin, PythonTask):
     if self.get_options().libraries_javadocs:
       confs.append('javadoc')
 
-    # TODO(gmalmquist): This is a terrible hack for backwards-compatibility with the pants-plugin.
-    # Kill it ASAP, and update test_export_integration#test_export_jar_path_with_excludes_soft to
-    # use the flag actually scoped for this task.
+    self._support_current_pants_plugin_options_usage()
+
+    compile_classpath = None
+    if confs:
+      compile_classpath = ClasspathProducts(self.get_options().pants_workdir)
+      self.resolve(executor=executor,
+                   targets=targets,
+                   classpath_products=compile_classpath,
+                   confs=confs)
+    return compile_classpath
+
+  # TODO: This is a terrible hack for backwards-compatibility with the pants-plugin.
+  # Kill it when https://github.com/pantsbuild/intellij-pants-plugin/issues/46 is resolved,
+  # and update test_export_integration#test_export_jar_path_with_excludes_soft to use the flag
+  # actually scoped for this task.
+  def _support_current_pants_plugin_options_usage(self):
     export_options = self.get_options()
     try:
       ivy_options = self.context.options.for_scope('resolve.ivy')
@@ -135,17 +152,6 @@ class ExportTask(IvyTaskMixin, PythonTask):
     for name in set.intersection(set(export_options), set(ivy_options)):
       if not ivy_options.is_default(name):
         setattr(export_options, name, RankedValue(RankedValue.FLAG, ivy_options[name]))
-    confs = confs or export_options.confs
-
-    compile_classpath = None
-    if confs:
-      compile_classpath = ClasspathProducts(self.get_options().pants_workdir)
-      self.resolve(executor=executor,
-                   targets=targets,
-                   classpath_products=compile_classpath,
-                   confs=confs,
-                   extra_args=())
-    return compile_classpath
 
   def generate_targets_map(self, targets, classpath_products=None):
     """Generates a dictionary containing all pertinent information about the target graph.
@@ -165,6 +171,8 @@ class ExportTask(IvyTaskMixin, PythonTask):
         classpath_products = self.resolve_jars(targets)
     else:
       classpath_products = None
+
+    target_roots_set = set(self.context.target_roots)
 
     def process_target(current_target):
       """
@@ -187,15 +195,22 @@ class ExportTask(IvyTaskMixin, PythonTask):
         'targets': [],
         'libraries': [],
         'roots': [],
+        'id': current_target.id,
         'target_type': get_target_type(current_target),
+        # NB: is_code_gen should be removed when export format advances to 1.1.0 or higher
         'is_code_gen': current_target.is_codegen,
-        'pants_target_type': self._get_pants_target_alias(type(current_target))
+        'is_synthetic': current_target.is_synthetic,
+        'pants_target_type': self._get_pants_target_alias(type(current_target)),
       }
 
       if not current_target.is_synthetic:
         info['globs'] = current_target.globs_relative_to_buildroot()
         if self.get_options().sources:
           info['sources'] = list(current_target.sources_relative_to_buildroot())
+
+      info['transitive'] = current_target.transitive
+      info['scope'] = str(current_target.scope)
+      info['is_target_root'] = current_target in target_roots_set
 
       if isinstance(current_target, PythonRequirementLibrary):
         reqs = current_target.payload.get_field_value('requirements', set())
@@ -245,6 +260,8 @@ class ExportTask(IvyTaskMixin, PythonTask):
       if isinstance(current_target, JvmTarget):
         info['excludes'] = [self._exclude_id(exclude) for exclude in current_target.excludes]
         info['platform'] = current_target.platform.name
+        if hasattr(current_target, 'test_platform'):
+          info['test_platform'] = current_target.test_platform.name
 
       info['roots'] = map(lambda (source_root, package_prefix): {
         'source_root': source_root,
@@ -265,7 +282,7 @@ class ExportTask(IvyTaskMixin, PythonTask):
           'target_level' : str(platform.target_level),
           'source_level' : str(platform.source_level),
           'args' : platform.args,
-        } for platform_name, platform in JvmPlatform.global_instance().platforms_by_name.items() }
+        } for platform_name, platform in JvmPlatform.global_instance().platforms_by_name.items() },
     }
 
     graph_info = {
@@ -273,9 +290,27 @@ class ExportTask(IvyTaskMixin, PythonTask):
       'targets': targets_map,
       'jvm_platforms': jvm_platforms_map,
     }
-    jvm_distributions = DistributionLocator.global_instance().all_jdk_paths()
-    if jvm_distributions:
-      graph_info['jvm_distributions'] = jvm_distributions
+
+    # `jvm_distributions` are static distribution settings from config,
+    # `preferred_jvm_distributions` are distributions that pants actually uses for the
+    # given platform setting.
+    graph_info['preferred_jvm_distributions'] = {}
+
+    def get_preferred_distribution(platform, strict):
+      try:
+        return JvmPlatform.preferred_jvm_distribution([platform], strict=strict)
+      except DistributionLocator.Error:
+        return None
+
+    for platform_name, platform in JvmPlatform.global_instance().platforms_by_name.items():
+      preferred_distributions = {}
+      for strict, strict_key in [(True, 'strict'), (False, 'non_strict')]:
+        dist = get_preferred_distribution(platform, strict=strict)
+        if dist:
+          preferred_distributions[strict_key] = dist.home
+
+      if preferred_distributions:
+        graph_info['preferred_jvm_distributions'][platform_name] = preferred_distributions
 
     if classpath_products:
       graph_info['libraries'] = self._resolve_jars_info(targets, classpath_products)
@@ -336,8 +371,7 @@ class ExportTask(IvyTaskMixin, PythonTask):
     if pants_target_type in self.target_aliases_map:
       return self.target_aliases_map.get(pants_target_type)
     else:
-      raise TaskError('Unregistered target type {target_type}'
-                      .format(target_type=pants_target_type))
+      return "{}.{}".format(pants_target_type.__module__, pants_target_type.__name__)
 
   @staticmethod
   def _source_roots_for_target(target):
@@ -359,7 +393,7 @@ class Export(ExportTask, ConsoleTask):
   @classmethod
   def register_options(cls, register):
     super(Export, cls).register_options(register)
-    register('--formatted', default=True, action='store_false',
+    register('--formatted', type=bool, implicit_value=False,
              help='Causes output to be a single line of JSON.')
 
   def __init__(self, *args, **kwargs):

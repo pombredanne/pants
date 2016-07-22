@@ -98,9 +98,12 @@ class PythonChrootTest(BaseTest):
                                     sources=['word.g'],
                                     module='word')
 
+    # TODO: see 3rdparty/python/BUILD
+    antlr3_requirement = PythonRequirement('antlr_python_runtime==3.1.3',
+                                           repository='http://www.antlr3.org/download/Python/')
     antlr3 = self.make_target(spec='3rdparty/python:antlr3',
                               target_type=PythonRequirementLibrary,
-                              requirements=[PythonRequirement('antlr_python_runtime==3.1.3')])
+                              requirements=[antlr3_requirement])
     self.create_file(relpath='src/python/test/main.py', contents=dedent("""
       import antlr3
 
@@ -198,7 +201,9 @@ class PythonChrootTest(BaseTest):
         self.assertEqual('Hello World!', stdout.strip())
 
         if inspect_chroot:
-          inspect_chroot(python_chroot)
+          # Snap a clean copy of the chroot with just the chroots added files.
+          chroot = pex_builder.clone().path()
+          inspect_chroot(chroot)
 
   def test_thrift(self):
     with self.do_test_thrift():
@@ -229,9 +234,9 @@ class PythonChrootTest(BaseTest):
     # PythonThriftLibrary's thrift files as well as its transitive dependencies thrift files.
     # We test here that the generated chroot only contains 1 copy of each thrift stub in the face
     # of transitive thrift deps.
-    def inspect_chroot(python_chroot):
+    def inspect_chroot(chroot):
       all_constants_files = set()
-      for root, _, files in os.walk(python_chroot.path()):
+      for root, _, files in os.walk(chroot):
         all_constants_files.update(os.path.join(root, f) for f in files if f == 'constants.py')
 
       # If core/constants.py was included in test/ we'd have 2 copies of core/constants.py plus

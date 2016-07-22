@@ -25,9 +25,7 @@ class ChangeCalculator(object):
                fast=False,
                changes_since=None,
                diffspec=None,
-               exclude_target_regexp=None,
-               spec_excludes=None):
-
+               exclude_target_regexp=None):
     self._scm = scm
     self._workspace = workspace
     self._address_mapper = address_mapper
@@ -38,7 +36,6 @@ class ChangeCalculator(object):
     self._changes_since = changes_since
     self._diffspec = diffspec
     self._exclude_target_regexp = exclude_target_regexp
-    self._spec_excludes = spec_excludes
 
     self._mapper_cache = None
 
@@ -76,7 +73,7 @@ class ChangeCalculator(object):
       return changed
 
     # Load the whole build graph since we need it for dependee finding in either remaining case.
-    for address in self._address_mapper.scan_addresses(spec_excludes=self._spec_excludes):
+    for address in self._address_mapper.scan_addresses():
       self._build_graph.inject_address_closure(address)
 
     if self._include_dependees == 'direct':
@@ -119,7 +116,7 @@ class ChangedFileTaskMixin(object):
 
   @classmethod
   def register_change_file_options(cls, register):
-    register('--fast', action='store_true', default=False,
+    register('--fast', type=bool,
              help='Stop searching for owners once a source is mapped to at least owning target.')
     register('--changes-since', '--parent',
              help='Calculate changes since this tree-ish/scm ref (defaults to current HEAD/tip).')
@@ -129,7 +126,7 @@ class ChangedFileTaskMixin(object):
              help='Include direct or transitive dependees of changed targets.')
 
   @classmethod
-  def change_calculator(cls, options, address_mapper, build_graph, scm=None, workspace=None, spec_excludes=None):
+  def change_calculator(cls, options, address_mapper, build_graph, scm=None, workspace=None):
     scm = scm or get_scm()
     if scm is None:
       raise TaskError('No SCM available.')
@@ -145,5 +142,4 @@ class ChangedFileTaskMixin(object):
                             diffspec=options.diffspec,
                             # NB: exclude_target_regexp is a global scope option registered
                             # elsewhere
-                            exclude_target_regexp=options.exclude_target_regexp,
-                            spec_excludes=spec_excludes)
+                            exclude_target_regexp=options.exclude_target_regexp)

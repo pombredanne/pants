@@ -13,7 +13,7 @@ from hashlib import sha1
 from pants.build_graph.build_graph import sort_targets
 from pants.build_graph.target import Target
 from pants.invalidation.build_invalidator import BuildInvalidator, CacheKeyGenerator
-from pants.util.dirutil import safe_mkdir
+from pants.util.dirutil import relative_symlink, safe_mkdir
 
 
 class VersionedTargetSet(object):
@@ -27,6 +27,9 @@ class VersionedTargetSet(object):
 
   @staticmethod
   def from_versioned_targets(versioned_targets):
+    """
+    :API: public
+    """
     first_target = versioned_targets[0]
     cache_manager = first_target._cache_manager
 
@@ -53,12 +56,12 @@ class VersionedTargetSet(object):
     self.previous_cache_key = cache_manager.previous_key(self.cache_key)
     self.valid = self.previous_cache_key == self.cache_key
 
-    self.num_chunking_units = self.cache_key.num_chunking_units
     if cache_manager.invalidation_report:
       cache_manager.invalidation_report.add_vts(cache_manager, self.targets, self.cache_key,
                                                 self.valid, phase='init')
 
     self._results_dir = None
+    self._current_results_dir = None
     self._previous_results_dir = None
     # True if the results_dir for this VT was created incrementally via clone of the
     # previous results_dir.
@@ -68,6 +71,10 @@ class VersionedTargetSet(object):
     self._cache_manager.update(self)
 
   def force_invalidate(self):
+    # Note: This method isn't exposted as Public because the api is not yet
+    # finalized, however it is currently used by Square for plugins.  There is
+    # an open OSS issue to finalize this API.  Please take care when changing
+    # until https://github.com/pantsbuild/pants/issues/2532 is resolved.
     self._cache_manager.force_invalidate(self)
 
   @property
@@ -75,11 +82,27 @@ class VersionedTargetSet(object):
     return self._results_dir is not None
 
   @property
+  def has_previous_results_dir(self):
+    return self._previous_results_dir is not None
+
+  @property
   def results_dir(self):
-    """The directory that stores results for this version of these targets."""
+    """The directory that stores results for these targets.
+
+    The results_dir is represented by a stable symlink to the current_results_dir: consumers
+    should generally prefer to access the stable directory.
+    """
     if self._results_dir is None:
       raise ValueError('No results_dir was created for {}'.format(self))
     return self._results_dir
+
+  @property
+  def current_results_dir(self):
+    """A unique directory that stores results for this version of these targets.
+    """
+    if self._current_results_dir is None:
+      raise ValueError('No results_dir was created for {}'.format(self))
+    return self._current_results_dir
 
   @property
   def previous_results_dir(self):
@@ -94,6 +117,14 @@ class VersionedTargetSet(object):
       raise ValueError('There is no previous_results_dir for: {}'.format(self))
     return self._previous_results_dir
 
+  def live_dirs(self):
+    """Yields directories that must exist for this VersionedTarget to function."""
+    if self.has_results_dir:
+      yield self.results_dir
+      yield self.current_results_dir
+      if self.has_previous_results_dir:
+        yield self.previous_results_dir
+
   def __repr__(self):
     return 'VTS({}, {})'.format(','.join(target.address.spec for target in self.targets),
                                 'valid' if self.valid else 'invalid')
@@ -102,9 +133,16 @@ class VersionedTargetSet(object):
 class VersionedTarget(VersionedTargetSet):
   """This class represents a singleton VersionedTargetSet, and has links to VersionedTargets that
   the wrapped target depends on (after having resolved through any "alias" targets.
+
+  :API: public
   """
 
+  _STABLE_DIR_NAME = 'current'
+
   def __init__(self, cache_manager, target, cache_key):
+    """
+    :API: public
+    """
     if not isinstance(target, Target):
       raise ValueError("The target {} must be an instance of Target but is not.".format(target.id))
 
@@ -114,28 +152,58 @@ class VersionedTarget(VersionedTargetSet):
     super(VersionedTarget, self).__init__(cache_manager, [self])
     self.id = target.id
 
+  def _results_dir_path(self, root_dir, key, stable):
+    """Return a results directory path for the given key.
+
+    :param key: A CacheKey to generate an id for.
+    :param stable: True to use a stable subdirectory, false to use a portion of the cache key to
+      generate a path unique to the key.
+    """
+    task_version = self._cache_manager.task_version
+    # TODO: Shorten cache_key hashes in general?
+    return os.path.join(
+        root_dir,
+        sha1(task_version).hexdigest()[:12],
+        key.id,
+        self._STABLE_DIR_NAME if stable else sha1(key.hash).hexdigest()[:12]
+    )
+
   def create_results_dir(self, root_dir, allow_incremental):
     """Ensures that a results_dir exists under the given root_dir for this versioned target.
 
     If incremental=True, attempts to clone the results_dir for the previous version of this target
     to the new results dir. Otherwise, simply ensures that the results dir exists.
     """
-    def dirname(key):
-      # TODO: Shorten cache_key hashes in general?
-      return os.path.join(root_dir, key.id, sha1(key.hash).hexdigest()[:12])
-    new_dir = dirname(self.cache_key)
-    self._results_dir = new_dir
+    # Generate unique and stable directory paths for this cache key.
+    current_dir = self._results_dir_path(root_dir, self.cache_key, stable=False)
+    self._current_results_dir = current_dir
+    stable_dir = self._results_dir_path(root_dir, self.cache_key, stable=True)
+    self._results_dir = stable_dir
     if self.valid:
+      # If the target is valid, both directories can be assumed to exist.
       return
 
-    if allow_incremental and self.previous_cache_key:
+    # Clone from the previous results_dir if incremental, or initialize.
+    previous_dir = self._use_previous_dir(allow_incremental, root_dir, current_dir)
+    if previous_dir is not None:
       self.is_incremental = True
-      old_dir = dirname(self.previous_cache_key)
-      self._previous_results_dir = old_dir
-      if os.path.isdir(old_dir) and not os.path.isdir(new_dir):
-        shutil.copytree(old_dir, new_dir)
+      self._previous_results_dir = previous_dir
+      shutil.copytree(previous_dir, current_dir)
     else:
-      safe_mkdir(new_dir)
+      safe_mkdir(current_dir)
+
+    # Finally, create the stable symlink.
+    relative_symlink(current_dir, stable_dir)
+
+  def _use_previous_dir(self, allow_incremental, root_dir, current_dir):
+    if not allow_incremental or not self.previous_cache_key:
+      # Not incremental.
+      return None
+    previous_dir = self._results_dir_path(root_dir, self.previous_cache_key, stable=False)
+    if not os.path.isdir(previous_dir) or os.path.isdir(current_dir):
+      # Could be useful, but no previous results are present.
+      return None
+    return previous_dir
 
   def __repr__(self):
     return 'VT({}, {})'.format(self.target.id, 'valid' if self.valid else 'invalid')
@@ -151,92 +219,16 @@ class InvalidationCheck(object):
   are implemented.
   """
 
-  @classmethod
-  def _partition_versioned_targets(cls, versioned_targets, partition_size_hint, vt_colors=None):
-    """Groups versioned targets so that each group has roughly the same number of sources.
-
-    versioned_targets is a list of VersionedTarget objects  [vt1, vt2, vt3, vt4, vt5, vt6, ...].
-
-    Returns a list of VersionedTargetSet objects, e.g., [VT1, VT2, VT3, ...] representing the
-    same underlying targets. E.g., VT1 is the combination of [vt1, vt2, vt3], VT2 is the combination
-    of [vt4, vt5] and VT3 is [vt6].
-
-    The new versioned targets are chosen to have roughly partition_size_hint sources.
-
-    If vt_colors is specified, it must be a map from VersionedTarget -> opaque 'color' values.
-    Two VersionedTargets will be in the same partition only if they have the same color.
-
-    This is useful as a compromise between flat mode, where we build all targets in a
-    single compiler invocation, and non-flat mode, where we invoke a compiler for each target,
-    which may lead to lots of compiler startup overhead. A task can choose instead to build one
-    group at a time.
+  def __init__(self, all_vts, invalid_vts):
     """
-    res = []
-
-    # Hack around the python outer scope problem.
-    class VtGroup(object):
-
-      def __init__(self):
-        self.vts = []
-        self.total_chunking_units = 0
-
-    current_group = VtGroup()
-
-    def add_to_current_group(vt):
-      current_group.vts.append(vt)
-      current_group.total_chunking_units += vt.num_chunking_units
-
-    def close_current_group():
-      if len(current_group.vts) > 0:
-        new_vt = VersionedTargetSet.from_versioned_targets(current_group.vts)
-        res.append(new_vt)
-        current_group.vts = []
-        current_group.total_chunking_units = 0
-
-    current_color = None
-    for vt in versioned_targets:
-      if vt_colors:
-        color = vt_colors.get(vt, current_color)
-        if current_color is None:
-          current_color = color
-        if color != current_color:
-          close_current_group()
-          current_color = color
-      add_to_current_group(vt)
-      if current_group.total_chunking_units > 1.5 * partition_size_hint and len(current_group.vts) > 1:
-        # Too big. Close the current group without this vt and add it to the next one.
-        current_group.vts.pop()
-        close_current_group()
-        add_to_current_group(vt)
-      elif current_group.total_chunking_units > partition_size_hint:
-        close_current_group()
-    close_current_group()  # Close the last group, if any.
-
-    return res
-
-  def __init__(self, all_vts, invalid_vts, partition_size_hint=None, target_colors=None):
-    # target_colors is specified by Target. We need it by VersionedTarget.
-    vt_colors = {}
-    if target_colors:
-      for vt in all_vts:
-        if vt.target in target_colors:
-          vt_colors[vt] = target_colors[vt.target]
+    :API: public
+    """
 
     # All the targets, valid and invalid.
     self.all_vts = all_vts
 
-    # All the targets, partitioned if so requested.
-    self.all_vts_partitioned = \
-      self._partition_versioned_targets(all_vts, partition_size_hint, vt_colors) \
-        if (partition_size_hint or vt_colors) else all_vts
-
     # Just the invalid targets.
     self.invalid_vts = invalid_vts
-
-    # Just the invalid targets, partitioned if so requested.
-    self.invalid_vts_partitioned = \
-      self._partition_versioned_targets(invalid_vts, partition_size_hint, vt_colors) \
-        if (partition_size_hint or vt_colors) else invalid_vts
 
 
 class InvalidationCacheManager(object):
@@ -254,21 +246,32 @@ class InvalidationCacheManager(object):
                invalidate_dependents,
                fingerprint_strategy=None,
                invalidation_report=None,
-               task_name=None):
+               task_name=None,
+               task_version=None,
+               artifact_write_callback=lambda _: None):
+    """
+    :API: public
+    """
     self._cache_key_generator = cache_key_generator
     self._task_name = task_name or 'UNKNOWN'
+    self._task_version = task_version or 'Unknown_0'
     self._invalidate_dependents = invalidate_dependents
     self._invalidator = BuildInvalidator(build_invalidator_dir)
     self._fingerprint_strategy = fingerprint_strategy
+    self._artifact_write_callback = artifact_write_callback
     self.invalidation_report = invalidation_report
 
   def update(self, vts):
     """Mark a changed or invalidated VersionedTargetSet as successfully processed."""
     for vt in vts.versioned_targets:
-      self._invalidator.update(vt.cache_key)
-      vt.valid = True
-    self._invalidator.update(vts.cache_key)
-    vts.valid = True
+      if not vt.valid:
+        self._invalidator.update(vt.cache_key)
+        vt.valid = True
+        self._artifact_write_callback(vt)
+    if not vts.valid:
+      self._invalidator.update(vts.cache_key)
+      vts.valid = True
+      self._artifact_write_callback(vts)
 
   def force_invalidate(self, vts):
     """Force invalidation of a VersionedTargetSet."""
@@ -280,28 +283,27 @@ class InvalidationCacheManager(object):
 
   def check(self,
             targets,
-            partition_size_hint=None,
-            target_colors=None,
             topological_order=False):
     """Checks whether each of the targets has changed and invalidates it if so.
 
     Returns a list of VersionedTargetSet objects (either valid or invalid). The returned sets
-    'cover' the input targets, possibly partitioning them, with one caveat: if the FingerprintStrategy
+    'cover' the input targets, with one caveat: if the FingerprintStrategy
     opted out of fingerprinting a target because it doesn't contribute to invalidation, then that
-    target will be excluded from all_vts, invalid_vts, and the partitioned VTS.
+    target will be excluded from all_vts and invalid_vts.
 
     Callers can inspect these vts and rebuild the invalid ones, for example.
-
-    If target_colors is specified, it must be a map from Target -> opaque 'color' values.
-    Two Targets will be in the same partition only if they have the same color.
     """
     all_vts = self.wrap_targets(targets, topological_order=topological_order)
     invalid_vts = filter(lambda vt: not vt.valid, all_vts)
-    return InvalidationCheck(all_vts, invalid_vts, partition_size_hint, target_colors)
+    return InvalidationCheck(all_vts, invalid_vts)
 
   @property
   def task_name(self):
     return self._task_name
+
+  @property
+  def task_version(self):
+    return self._task_version
 
   def wrap_targets(self, targets, topological_order=False):
     """Wrap targets and their computed cache keys in VersionedTargets.
@@ -313,7 +315,8 @@ class InvalidationCacheManager(object):
     """
     def vt_iter():
       if topological_order:
-        sorted_targets = [t for t in reversed(sort_targets(targets)) if t in targets]
+        target_set = set(targets)
+        sorted_targets = [t for t in reversed(sort_targets(targets)) if t in target_set]
       else:
         sorted_targets = sorted(targets)
       for target in sorted_targets:

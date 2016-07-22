@@ -5,7 +5,6 @@
 from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
                         unicode_literals, with_statement)
 
-import functools
 import inspect
 from abc import abstractmethod
 from collections import defaultdict
@@ -75,14 +74,7 @@ class TargetMacro(object):
       """
       macro = self.macro(parse_context)
 
-      class BuildFileTargetFactoryMacro(BuildFileTargetFactory, TargetMacro):
-        @property
-        def target_types(_):
-          return self.target_types
-
-        expand = macro.expand
-
-      return BuildFileTargetFactoryMacro()
+      return _BuildFileTargetFactoryMacro(macro.expand, self.target_types)
 
   def __call__(self, *args, **kwargs):
     self.expand(*args, **kwargs)
@@ -97,6 +89,8 @@ class BuildFileAliases(object):
 
   There are three types of symbols that can be directly exposed:
 
+  :API: public
+
   - targets: These are Target subclasses or TargetMacro.Factory instances.
   - objects: These are any python object, from constants to types.
   - context_aware_object_factories: These are object factories that are passed a ParseContext and
@@ -106,26 +100,6 @@ class BuildFileAliases(object):
     BUILD file path or functions that need to be able to create targets or objects from within the
     BUILD file parse.
   """
-
-  @classmethod
-  def curry_context(cls, wrappee):
-    """Curry a function with a build file context.
-
-    Given a function foo(ctx, bar) that you want to expose in BUILD files
-    as foo(bar), use::
-
-        context_aware_object_factories={
-          'foo': BuildFileAliases.curry_context(foo),
-        }
-    """
-    # You might wonder: why not just use lambda and functools.partial?
-    # That loses the __doc__, thus messing up the BUILD dictionary.
-    wrapper = lambda ctx: functools.partial(wrappee, ctx)
-    wrapper.__doc__ = wrappee.__doc__
-    wrapper.__name__ = str(".".join(["curry_context",
-                                     wrappee.__module__,
-                                     wrappee.__name__]))
-    return wrapper
 
   @staticmethod
   def _is_target_type(obj):
@@ -199,6 +173,8 @@ class BuildFileAliases(object):
 
   def __init__(self, targets=None, objects=None, context_aware_object_factories=None):
     """
+    :API: public
+
     :param dict targets: A mapping from string aliases to Target subclasses or TargetMacro.Factory
                          instances
     :param dict objects: A mapping from string aliases to arbitrary objects.
@@ -214,6 +190,8 @@ class BuildFileAliases(object):
   def target_types(self):
     """Returns a mapping from string aliases to Target subclasses.
 
+    :API: public
+
     :rtype: dict
     """
     return self._target_types
@@ -221,6 +199,8 @@ class BuildFileAliases(object):
   @property
   def target_macro_factories(self):
     """Returns a mapping from string aliases to TargetMacro.Factory instances.
+
+    :API: public
 
     :rtype: dict
     """
@@ -230,6 +210,8 @@ class BuildFileAliases(object):
   def objects(self):
     """Returns a mapping from string aliases to arbitrary objects.
 
+    :API: public
+
     :rtype: dict
     """
     return self._objects
@@ -237,6 +219,8 @@ class BuildFileAliases(object):
   @property
   def context_aware_object_factories(self):
     """Returns a mapping from string aliases to context aware object factory callables.
+
+    :API: public
 
     :rtype: dict
     """
@@ -248,6 +232,8 @@ class BuildFileAliases(object):
 
     Normally there is 1 target type per alias, but macros can expand a single alias to several
     target types.
+
+    :API: public
 
     :rtype: dict
     """
@@ -262,6 +248,8 @@ class BuildFileAliases(object):
     """Merges a set of build file aliases and returns a new set of aliases containing both.
 
     Any duplicate aliases from `other` will trump.
+
+    :API: public
 
     :param other: The BuildFileAliases to merge in.
     :type other: :class:`BuildFileAliases`
@@ -301,3 +289,12 @@ class BuildFileAliases(object):
 
   def __hash__(self):
     return hash(self._tuple())
+
+
+class _BuildFileTargetFactoryMacro(BuildFileTargetFactory, TargetMacro):
+  def __init__(self, expand, target_types):
+    self._target_types = target_types
+    self.expand = expand
+
+  def target_types(self):
+    return self._target_types

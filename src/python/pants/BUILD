@@ -27,9 +27,19 @@ page(name='readme',
 python_library(
   name='version',
   sources=['version.py'],
+  dependencies = [
+    "src/python/pants/base:revision"
+  ]
 )
 
-page(
-  name='changelog',
-  source='CHANGELOG.rst'
+page(name='changelog',
+  source='CHANGELOG.md',
+  links=[
+    'src/python/pants/notes:notes-1.0.x',
+    'src/python/pants/notes:notes-master',
+  ],
+  description='''
+This file is no longer a changelog, but remains in this location in order to avoid breaking
+older changelog links unnecessarily. Could consider removing it by 2.0.x, perhaps.
+''',
 )

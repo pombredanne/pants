@@ -6,66 +6,130 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
                         unicode_literals, with_statement)
 
 import logging
-import traceback
+from abc import abstractmethod
 from collections import OrderedDict, defaultdict, deque
 
 from twitter.common.collections import OrderedSet
 
 from pants.build_graph.address import Address
 from pants.build_graph.address_lookup_error import AddressLookupError
+from pants.build_graph.target import Target
+from pants.util.meta import AbstractClass
 
 
 logger = logging.getLogger(__name__)
 
 
-class BuildGraph(object):
-  """A directed acyclic graph of Targets and dependencies. Not necessarily connected."""
+class BuildGraph(AbstractClass):
+  """A directed acyclic graph of Targets and dependencies. Not necessarily connected.
+
+  :API: public
+  """
 
   class DuplicateAddressError(AddressLookupError):
-    """The same address appears multiple times in a dependency list"""
+    """The same address appears multiple times in a dependency list
+
+    :API: public
+    """
 
   class TransitiveLookupError(AddressLookupError):
-    """Used to append the current node to the error message from an AddressLookupError """
+    """Used to append the current node to the error message from an AddressLookupError
+
+    :API: public
+    """
+
+  class ManualSyntheticTargetError(AddressLookupError):
+    """Used to indicate that an synthetic target was defined manually
+
+    :API: public
+    """
+
+    def __init__(self, addr):
+      super(BuildGraph.ManualSyntheticTargetError, self).__init__(
+          'Found a manually-defined target at synthetic address {}'.format(addr.spec))
+
+  class DepthAgnosticWalk(object):
+    """This is a utility class to aid in graph traversals that don't care about the depth."""
+
+    def __init__(self):
+      self._worked = set()
+      self._expanded = set()
+
+    def expanded_or_worked(self, vertex):
+      """Returns True if the vertex has been expanded or worked."""
+      return vertex in self._expanded or vertex in self._worked
+
+    def do_work_once(self, vertex):
+      """Returns True exactly once for the given vertex."""
+      if vertex in self._worked:
+        return False
+      self._worked.add(vertex)
+      return True
+
+    def expand_once(self, vertex, _):
+      """Returns True exactly once for the given vertex."""
+      if vertex in self._expanded:
+        return False
+      self._expanded.add(vertex)
+      return True
+
+  class DepthAwareWalk(DepthAgnosticWalk):
+    """This is a utility class to aid in graph traversals that care about the depth."""
+
+    def __init__(self):
+      super(BuildGraph.DepthAwareWalk, self).__init__()
+      self._expanded = defaultdict(set)
+
+    def expand_once(self, vertex, level):
+      """Returns True if this (vertex, level) pair has never been expanded, and False otherwise.
+
+      This method marks the (vertex, level) pair as expanded after executing, such that this method
+      will return True for a given (vertex, level) pair exactly once.
+      """
+      if level in self._expanded[vertex]:
+        return False
+      self._expanded[vertex].add(level)
+      return True
 
   @staticmethod
-  def closure(targets, bfs=False):
-    targets = OrderedSet(targets)
-    if not targets:
-      return OrderedSet()
+  def closure(*vargs, **kwargs):
+    """See `Target.closure_for_targets` for arguments.
 
-    build_graph = next(iter(targets))._build_graph
-    if bfs:
-      transitive_subgraph_fn = build_graph.transitive_subgraph_of_addresses_bfs
-    else:
-      transitive_subgraph_fn = build_graph.transitive_subgraph_of_addresses
+    :API: public
+    """
+    return Target.closure_for_targets(*vargs, **kwargs)
 
-    return transitive_subgraph_fn(t.address for t in targets)
-
-  def __init__(self, address_mapper):
-    self._address_mapper = address_mapper
+  def __init__(self):
     self.reset()
 
-  @property
-  def address_mapper(self):
-    return self._address_mapper
-
   def reset(self):
-    """Clear out the state of the BuildGraph, in particular Target mappings and dependencies."""
-    self._addresses_already_closed = set()
+    """Clear out the state of the BuildGraph, in particular Target mappings and dependencies.
+
+    :API: public
+    """
     self._target_by_address = OrderedDict()
     self._target_dependencies_by_address = defaultdict(OrderedSet)
     self._target_dependees_by_address = defaultdict(set)
     self._derived_from_by_derivative_address = {}
+    self.synthetic_addresses = set()
 
   def contains_address(self, address):
+    """
+    :API: public
+    """
     return address in self._target_by_address
 
   def get_target_from_spec(self, spec, relative_to=''):
-    """Converts `spec` into an address and returns the result of `get_target`"""
+    """Converts `spec` into an address and returns the result of `get_target`
+
+    :API: public
+    """
     return self.get_target(Address.parse(spec, relative_to=relative_to))
 
   def get_target(self, address):
     """Returns the Target at `address` if it has been injected into the BuildGraph, otherwise None.
+
+    :API: public
     """
     return self._target_by_address.get(address, None)
 
@@ -73,6 +137,8 @@ class BuildGraph(object):
     """Returns the dependencies of the Target at `address`.
 
     This method asserts that the address given is actually in the BuildGraph.
+
+    :API: public
     """
     assert address in self._target_by_address, (
       'Cannot retrieve dependencies of {address} because it is not in the BuildGraph.'
@@ -84,6 +150,8 @@ class BuildGraph(object):
     """Returns the Targets which depend on the target at `address`.
 
     This method asserts that the address given is actually in the BuildGraph.
+
+    :API: public
     """
     assert address in self._target_by_address, (
       'Cannot retrieve dependents of {address} because it is not in the BuildGraph.'
@@ -96,6 +164,8 @@ class BuildGraph(object):
 
     If a Target was injected programmatically, e.g. from codegen, this allows us to trace its
     ancestry.  If a Target is not derived, default to returning itself.
+
+    :API: public
     """
     parent_address = self._derived_from_by_derivative_address.get(address, address)
     return self.get_target(parent_address)
@@ -104,6 +174,8 @@ class BuildGraph(object):
     """Get the concrete target the specified target was (directly or indirectly) derived from.
 
     The returned target is guaranteed to not have been derived from any other target.
+
+    :API: public
     """
     current_address = address
     next_address = self._derived_from_by_derivative_address.get(current_address, current_address)
@@ -112,14 +184,26 @@ class BuildGraph(object):
       next_address = self._derived_from_by_derivative_address.get(current_address, current_address)
     return self.get_target(current_address)
 
-  def inject_target(self, target, dependencies=None, derived_from=None):
+  def inject_target(self, target, dependencies=None, derived_from=None, synthetic=False):
     """Injects a fully realized Target into the BuildGraph.
+
+    :API: public
 
     :param Target target: The Target to inject.
     :param list<Address> dependencies: The Target addresses that `target` depends on.
     :param Target derived_from: The Target that `target` was derived from, usually as a result
       of codegen.
+    :param bool synthetic: Whether to flag this target as synthetic, even if it isn't derived
+      from another target.
     """
+    if self.contains_address(target.address):
+      raise ValueError('Attempted to inject synthetic {target} derived from {derived_from}'
+                       ' into the BuildGraph with address {address}, but there is already a Target'
+                       ' {existing_target} with that address'
+                       .format(target=target,
+                               derived_from=derived_from,
+                               address=target.address,
+                               existing_target=self.get_target(target.address)))
 
     dependencies = dependencies or frozenset()
     address = target.address
@@ -141,6 +225,9 @@ class BuildGraph(object):
                                  derived_from=derived_from))
       self._derived_from_by_derivative_address[target.address] = derived_from.address
 
+    if derived_from or synthetic:
+      self.synthetic_addresses.add(address)
+
     self._target_by_address[address] = target
 
     for dependency_address in dependencies:
@@ -151,6 +238,8 @@ class BuildGraph(object):
 
     It is an error to inject a dependency if the dependent doesn't already exist, but the reverse
     is not an error.
+
+    :API: public
 
     :param Address dependent: The (already injected) address of a Target to which `dependency`
       is being added.
@@ -186,16 +275,25 @@ class BuildGraph(object):
   def targets(self, predicate=None):
     """Returns all the targets in the graph in no particular order.
 
+    :API: public
+
     :param predicate: A target predicate that will be used to filter the targets returned.
     """
     return filter(predicate, self._target_by_address.values())
 
   def sorted_targets(self):
-    """:return: targets ordered from most dependent to least."""
-    return sort_targets(self._target_by_address.values())
+    """
+    :API: public
 
-  def walk_transitive_dependency_graph(self, addresses, work, predicate=None, postorder=False):
+    :return: targets ordered from most dependent to least.
+    """
+    return sort_targets(self.targets())
+
+  def walk_transitive_dependency_graph(self, addresses, work, predicate=None, postorder=False,
+                                       leveled_predicate=None):
     """Given a work function, walks the transitive dependency closure of `addresses` using DFS.
+
+    :API: public
 
     :param list<Address> addresses: The closure of `addresses` will be walked.
     :param function work: The function that will be called on every target in the closure using
@@ -206,20 +304,37 @@ class BuildGraph(object):
       out of the closure.  If it is given, any Target which fails the predicate will not be
       walked, nor will its dependencies.  Thus predicate effectively trims out any subgraph
       that would only be reachable through Targets that fail the predicate.
+    :param function leveled_predicate: Behaves identically to predicate, but takes the depth of the
+      target in the search tree as a second parameter, and it is checked just before a dependency is
+      expanded.
     """
-    walked = set()
+    # Use the DepthAgnosticWalk if we can, because DepthAwareWalk does a bit of extra work that can
+    # slow things down by few millis.
+    walker = self.DepthAwareWalk if leveled_predicate else self.DepthAgnosticWalk
+    walk = walker()
+    def _walk_rec(addr, level=0):
+      # If we've followed an edge to this address, stop recursing.
+      if not walk.expand_once(addr, level):
+        return
 
-    def _walk_rec(addr):
-      if addr not in walked:
-        walked.add(addr)
-        target = self._target_by_address[addr]
-        if not predicate or predicate(target):
-          if not postorder:
-            work(target)
-          for dep_address in self._target_dependencies_by_address[addr]:
-            _walk_rec(dep_address)
-          if postorder:
-            work(target)
+      target = self._target_by_address[addr]
+
+      if predicate and not predicate(target):
+        return
+
+      if not postorder and walk.do_work_once(addr):
+        work(target)
+
+      for dep_address in self._target_dependencies_by_address[addr]:
+        if walk.expanded_or_worked(dep_address):
+          continue
+        if not leveled_predicate \
+                or leveled_predicate(self._target_by_address[dep_address], level):
+          _walk_rec(dep_address, level + 1)
+
+      if postorder and walk.do_work_once(addr):
+        work(target)
+
     for address in addresses:
       _walk_rec(address)
 
@@ -229,6 +344,8 @@ class BuildGraph(object):
 
     This is identical to reversing the direction of every arrow in the DAG, then calling
     `walk_transitive_dependency_graph`.
+
+    :API: public
     """
     walked = set()
 
@@ -253,6 +370,8 @@ class BuildGraph(object):
     hence it trims graphs rather than just filtering out Targets that do not match the predicate.
     See `walk_transitive_dependee_graph for more detail on `predicate`.
 
+    :API: public
+
     :param list<Address> addresses: The root addresses to transitively close over.
     :param function predicate: The predicate passed through to `walk_transitive_dependee_graph`.
     """
@@ -261,43 +380,73 @@ class BuildGraph(object):
                                         postorder=postorder)
     return ret
 
-  def transitive_subgraph_of_addresses(self, addresses, predicate=None, postorder=False):
+  def transitive_subgraph_of_addresses(self, addresses, *vargs, **kwargs):
     """Returns all transitive dependencies of `address`.
 
     Note that this uses `walk_transitive_dependencies_graph` and the predicate is passed through,
     hence it trims graphs rather than just filtering out Targets that do not match the predicate.
-    See `walk_transitive_dependencies_graph for more detail on `predicate`.
+    See `walk_transitive_dependency_graph for more detail on `predicate`.
+
+    :API: public
 
     :param list<Address> addresses: The root addresses to transitively close over.
     :param function predicate: The predicate passed through to
       `walk_transitive_dependencies_graph`.
+    :param bool postorder: When ``True``, the traversal order is postorder (children before
+      parents), else it is preorder (parents before children).
+    :param function predicate: If this parameter is not given, no Targets will be filtered
+      out of the closure.  If it is given, any Target which fails the predicate will not be
+      walked, nor will its dependencies.  Thus predicate effectively trims out any subgraph
+      that would only be reachable through Targets that fail the predicate.
+    :param function leveled_predicate: Behaves identically to predicate, but takes the depth of the
+      target in the search tree as a second parameter, and it is checked just before a dependency is
+      expanded.
     """
     ret = OrderedSet()
     self.walk_transitive_dependency_graph(addresses, ret.add,
-                                          predicate=predicate,
-                                          postorder=postorder)
+                                          *vargs,
+                                          **kwargs)
     return ret
 
-  def transitive_subgraph_of_addresses_bfs(self, addresses, predicate=None):
+  def transitive_subgraph_of_addresses_bfs(self, addresses, predicate=None, leveled_predicate=None):
     """Returns the transitive dependency closure of `addresses` using BFS.
+
+    :API: public
 
     :param list<Address> addresses: The closure of `addresses` will be walked.
     :param function predicate: If this parameter is not given, no Targets will be filtered
       out of the closure.  If it is given, any Target which fails the predicate will not be
       walked, nor will its dependencies.  Thus predicate effectively trims out any subgraph
       that would only be reachable through Targets that fail the predicate.
+    :param function leveled_predicate: Behaves identically to predicate, but takes the depth of the
+      target in the search tree as a second parameter, and it is checked just before a dependency is
+      expanded.
     """
-    walked = OrderedSet()
-    to_walk = deque(addresses)
+    ordered_closure = OrderedSet()
+    # Use the DepthAgnosticWalk if we can, because DepthAwareWalk does a bit of extra work that can
+    # slow things down by few millis.
+    walker = self.DepthAwareWalk if leveled_predicate else self.DepthAgnosticWalk
+    walk = walker()
+    to_walk = deque((0, addr) for addr in addresses)
     while len(to_walk) > 0:
-      address = to_walk.popleft()
-      target = self._target_by_address[address]
-      if target not in walked:
-        if not predicate or predicate(target):
-          walked.add(target)
-          to_walk.extend(self._target_dependencies_by_address[address])
-    return walked
+      level, address = to_walk.popleft()
 
+      if not walk.expand_once(address, level):
+        continue
+
+      target = self._target_by_address[address]
+      if predicate and not predicate(target):
+        continue
+      if walk.do_work_once(address):
+        ordered_closure.add(target)
+      for addr in self._target_dependencies_by_address[address]:
+        if walk.expanded_or_worked(addr):
+          continue
+        if not leveled_predicate or leveled_predicate(self._target_by_address[addr], level):
+          to_walk.append((level + 1, addr))
+    return ordered_closure
+
+  @abstractmethod
   def inject_synthetic_target(self,
                               address,
                               target_type,
@@ -309,27 +458,27 @@ class BuildGraph(object):
     This method is useful especially for codegen, where a "derived" Target is injected
     programmatically rather than read in from a BUILD file.
 
+    :API: public
+
     :param Address address: The address of the new Target.  Must not already be in the BuildGraph.
     :param type target_type: The class of the Target to be constructed.
     :param list<Address> dependencies: The dependencies of this Target, usually inferred or copied
       from the `derived_from`.
     :param Target derived_from: The Target this Target will derive from.
     """
-    if self.contains_address(address):
-      raise ValueError('Attempted to inject synthetic {target_type} derived from {derived_from}'
-                       ' into the BuildGraph with address {address}, but there is already a Target'
-                       ' {existing_target} with that address'
-                       .format(target_type=target_type,
-                               derived_from=derived_from,
-                               address=address,
-                               existing_target=self.get_target(address)))
 
-    target = target_type(name=address.target_name,
-                         address=address,
-                         build_graph=self,
-                         **kwargs)
-    self.inject_target(target, dependencies=dependencies, derived_from=derived_from)
+  def maybe_inject_address_closure(self, address):
+    """If the given address is not already injected to the graph, calls inject_address_closure.
 
+    :API: public
+
+    :param Address address: The address to inject.  Must be resolvable by `self._address_mapper` or
+                            else be the address of an already injected entity.
+    """
+    if not self.contains_address(address):
+      self.inject_address_closure(address)
+
+  @abstractmethod
   def inject_address_closure(self, address):
     """Resolves, constructs and injects a Target and its transitive closure of dependencies.
 
@@ -337,88 +486,23 @@ class BuildGraph(object):
     addresses though, it delegates to an internal AddressMapper to resolve item the address points
     to.
 
+    :API: public
+
     :param Address address: The address to inject.  Must be resolvable by `self._address_mapper` or
                             else be the address of an already injected entity.
     """
 
-    if self.contains_address(address):
-      # The address was either mapped in or synthetically injected already.
-      return
+  @abstractmethod
+  def inject_specs_closure(self, specs, fail_fast=None):
+    """Resolves, constructs and injects Targets and their transitive closures of dependencies.
 
-    if address in self._addresses_already_closed:
-      # We've visited this address already in the course of the active recursive injection.
-      return
+    :API: public
 
-    mapper = self._address_mapper
-
-    target_address, target_addressable = mapper.resolve(address)
-
-    self._addresses_already_closed.add(target_address)
-    try:
-      dep_addresses = list(mapper.specs_to_addresses(target_addressable.dependency_specs,
-                                                     relative_to=target_address.spec_path))
-      deps_seen = set()
-      for dep_address in dep_addresses:
-        if dep_address in deps_seen:
-          raise self.DuplicateAddressError(
-            'Addresses in dependencies must be unique. \'{spec}\' is referenced more than once.'
-            .format(spec=dep_address.spec))
-        deps_seen.add(dep_address)
-        self.inject_address_closure(dep_address)
-
-      if not self.contains_address(target_address):
-        target = self._target_addressable_to_target(target_address, target_addressable)
-        self.inject_target(target, dependencies=dep_addresses)
-      else:
-        for dep_address in dep_addresses:
-          if dep_address not in self.dependencies_of(target_address):
-            self.inject_dependency(target_address, dep_address)
-        target = self.get_target(target_address)
-
-      def inject_spec_closure(spec):
-        addr = mapper.spec_to_address(spec, relative_to=target_address.spec_path)
-        self.inject_address_closure(addr)
-
-      for traversable_spec in target.traversable_dependency_specs:
-        inject_spec_closure(traversable_spec)
-        traversable_spec_target = self.get_target_from_spec(traversable_spec,
-                                                            relative_to=target_address.spec_path)
-        if traversable_spec_target not in target.dependencies:
-          self.inject_dependency(dependent=target.address,
-                                 dependency=traversable_spec_target.address)
-          target.mark_transitive_invalidation_hash_dirty()
-
-      for traversable_spec in target.traversable_specs:
-        inject_spec_closure(traversable_spec)
-        target.mark_transitive_invalidation_hash_dirty()
-
-    except AddressLookupError as e:
-      raise self.TransitiveLookupError("{message}\n  referenced from {spec}"
-                                       .format(message=e, spec=target_address.spec))
-
-  def _target_addressable_to_target(self, address, addressable):
-    """Realizes a TargetAddressable into a Target at `address`.
-
-    :param TargetAddressable addressable:
-    :param Address address:
+    :param specs: A list of base.specs.Spec objects to resolve and inject.
+    :param fail_fast: Whether to fail quickly for the first error, or to complete all
+      possible injections before failing.
+    :returns: Yields a sequence of resolved Address objects.
     """
-    try:
-      # TODO(John Sirois): Today - in practice, Addressable is unusable.  BuildGraph assumes
-      # addressables are in fact TargetAddressables with dependencies (see:
-      # `inject_address_closure` for example), ie: leaf nameable things with - by definition - no
-      # deps cannot actually be used.  Clean up BuildGraph to handle addressables as they are
-      # abstracted today which does not necessarily mean them having dependencies and thus forming
-      # graphs.  They may only be multiply-referred to leaf objects.
-      target = addressable.instantiate(build_graph=self, address=address)
-      return target
-    except Exception:
-      traceback.print_exc()
-      logger.exception('Failed to instantiate Target with type {target_type} with name "{name}"'
-                       ' at address {address}'
-                       .format(target_type=addressable.addressed_type,
-                               name=addressable.addressed_name,
-                               address=address))
-      raise
 
   def resolve(self, spec):
     """Returns an iterator over the target(s) the given address points to."""
@@ -429,7 +513,10 @@ class BuildGraph(object):
 
 
 class CycleException(Exception):
-  """Thrown when a circular dependency is detected."""
+  """Thrown when a circular dependency is detected.
+
+  :API: public
+  """
 
   def __init__(self, cycle):
     super(CycleException, self).__init__('Cycle detected:\n\t{}'.format(
@@ -438,7 +525,11 @@ class CycleException(Exception):
 
 
 def invert_dependencies(targets):
-  """:return: the full graph of dependencies for `targets` and the list of roots."""
+  """
+  :API: public
+
+  :return: the full graph of dependencies for `targets` and the list of roots.
+  """
   roots = set()
   inverted_deps = defaultdict(OrderedSet)  # target -> dependent targets
   visited = set()
@@ -469,7 +560,11 @@ def invert_dependencies(targets):
 
 
 def sort_targets(targets):
-  """:return: the targets that `targets` depend on sorted from most dependent to least."""
+  """
+  :API: public
+
+  :return: the targets that `targets` depend on sorted from most dependent to least.
+  """
 
   roots, inverted_deps = invert_dependencies(targets)
   ordered = []

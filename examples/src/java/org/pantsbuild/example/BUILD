@@ -1,11 +1,12 @@
 page(
   name='readme',
-  source='readme.md',
+  source='README.md',
   links=[
     ':3rdparty_jvm',
     ':from_maven',
+    ':publish',
     'examples/src/scala/org/pantsbuild/example:readme',
-    'src/docs:publish',
+    'src/docs:build_files',
     'src/docs:first_concepts',
     'src/docs:first_tutorial',
   ]
@@ -16,6 +17,15 @@ page(
   source='from_maven.md',
   links=[
     ':3rdparty_jvm',
+  ],
+)
+
+page(
+  name='publish',
+  source='publish.md',
+  links=[
+    'src/docs:dev_tasks_publish_extras',
+    'src/docs:howto_plugin',
   ],
 )
 

@@ -15,7 +15,6 @@ from pants.backend.jvm.tasks.classpath_util import ClasspathUtil
 from pants.backend.jvm.tasks.jvm_binary_task import JvmBinaryTask
 from pants.base.exceptions import TaskError
 from pants.java.jar.manifest import Manifest
-from pants.option.custom_types import list_option
 from pants.util.contextutil import open_zip
 from pants.util.memo import memoized_property
 
@@ -36,23 +35,16 @@ class DuplicateDetector(JvmBinaryTask):
   @classmethod
   def register_options(cls, register):
     super(DuplicateDetector, cls).register_options(register)
-
-    register('--excludes', default=[','.join(EXCLUDED_FILES)], action='append',
-             deprecated_version='0.0.65',
-             deprecated_hint='Use --exclude-files, --exclude-patterns, or --exclude-dirs instead.',
-             help='Case insensitive filenames (without directory) to exclude from duplicate check. '
-                  'Filenames can be specified in a comma-separated list or by using multiple '
-                  'instances of this flag.')
-    register('--exclude-files', default=EXCLUDED_FILES, type=list_option,
+    register('--exclude-files', default=EXCLUDED_FILES, type=list,
              help='Case insensitive filenames (without directory) to exclude from duplicate check.')
-    register('--exclude-dirs', default=EXCLUDED_DIRS, type=list_option,
+    register('--exclude-dirs', default=EXCLUDED_DIRS, type=list,
              help='Directory names to exclude from duplicate check.')
-    register('--exclude-patterns', default=EXCLUDED_PATTERNS, type=list_option,
+    register('--exclude-patterns', default=EXCLUDED_PATTERNS, type=list,
              help='Regular expressions matching paths (directory and filename) to exclude from '
                   'the duplicate check.')
     register('--max-dups', type=int, default=10,
              help='Maximum number of duplicate classes to display per artifact.')
-    register('--skip', action='store_true', default=False,
+    register('--skip', type=bool,
              help='Disable the dup checking step.')
 
   @classmethod
@@ -66,11 +58,7 @@ class DuplicateDetector(JvmBinaryTask):
 
   @memoized_property
   def exclude_files(self):
-    # Legacy, the excludes accepts a list of CSV filenames
-    legacy_excludes = [x.lower() for exclude in self.get_options().excludes or []
-                       for x in exclude.split(',')]
-    exclude_files = [x.lower() for x in self.get_options().exclude_files or []]
-    return set(exclude_files + legacy_excludes)
+    return set([x.lower() for x in self.get_options().exclude_files] or [])
 
   @memoized_property
   def exclude_dirs(self):

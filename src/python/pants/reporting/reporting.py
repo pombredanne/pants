@@ -11,7 +11,6 @@ import sys
 from six import StringIO
 
 from pants.base.workunit import WorkUnitLabel
-from pants.option.custom_types import dict_option
 from pants.reporting.html_reporter import HtmlReporter
 from pants.reporting.invalidation_report import InvalidationReport
 from pants.reporting.plaintext_reporter import LabelFormat, PlainTextReporter, ToolOutputFormat
@@ -28,19 +27,19 @@ class Reporting(Subsystem):
   @classmethod
   def register_options(cls, register):
     super(Reporting, cls).register_options(register)
-    register('--invalidation-report', default=False, action='store_true',
+    register('--invalidation-report', type=bool,
              help='Write a formatted report on the invalid objects to the specified path.')
     register('--reports-dir', advanced=True, metavar='<dir>',
              default=os.path.join(register.bootstrap.pants_workdir, 'reports'),
              help='Write reports to this dir.')
     register('--template-dir', advanced=True, metavar='<dir>', default=None,
              help='Find templates for rendering in this dir.')
-    register('--console-label-format', advanced=True, type=dict_option,
+    register('--console-label-format', advanced=True, type=dict,
              default=PlainTextReporter.LABEL_FORMATTING,
              help='Controls the printing of workunit labels to the console.  Workunit types are '
                   '{workunits}.  Possible formatting values are {formats}'.format(
                workunits=WorkUnitLabel.keys(), formats=LabelFormat.keys()))
-    register('--console-tool-output-format', advanced=True, type=dict_option,
+    register('--console-tool-output-format', advanced=True, type=dict,
              default=PlainTextReporter.TOOL_OUTPUT_FORMATTING,
              help='Controls the printing of workunit tool output to the console. Workunit types are '
                   '{workunits}.  Possible formatting values are {formats}'.format(

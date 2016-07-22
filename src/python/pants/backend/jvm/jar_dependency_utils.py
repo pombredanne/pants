@@ -38,7 +38,10 @@ class ResolvedJar(object):
 
 
 class M2Coordinate(object):
-  """Represents a fully qualified name of an artifact."""
+  """Represents a fully qualified name of an artifact.
+
+  :API: public
+  """
 
   def __init__(self, org, name, rev=None, classifier=None, ext=None):
     """
@@ -59,9 +62,39 @@ class M2Coordinate(object):
 
     self._id = (self.org, self.name, self.rev, self.classifier, self.ext)
 
+  @classmethod
+  def create(cls, jar):
+    """Creates an actual M2Coordinate from the given M2Coordinate-like object (eg a JarDependency).
+
+    :API: public
+
+    :param JarDependency jar: the input coordinate.
+    :return: A new M2Coordinate, unless the input is already an M2Coordinate in which case it just
+      returns the input unchanged.
+    :rtype: M2Coordinate
+    """
+    if isinstance(jar, cls):
+      return jar
+    return cls(org=jar.org, name=jar.name, rev=jar.rev, classifier=jar.classifier, ext=jar.ext)
+
+  @classmethod
+  def unversioned(cls, coord):
+    """The coordinate without the version.
+
+    :param M2Coordinate coord: an M2Coordinate or JarDependency.
+    :return: the coordinate without the version.
+    :rtype: M2Coordinate
+    """
+    coord = cls.create(coord)
+    if coord.rev is None:
+      return coord
+    return M2Coordinate(org=coord.org, name=coord.name, classifier=coord.classifier, ext=coord.ext)
+
   @memoized_property
   def artifact_filename(self):
     """Returns the canonical maven-style filename for an artifact pointed at by this coordinate.
+
+    :API: public
 
     :rtype: string
     """
@@ -73,6 +106,11 @@ class M2Coordinate(object):
                                                         rev=maybe_compenent(self.rev),
                                                         classifier=maybe_compenent(self.classifier),
                                                         ext=self.ext)
+
+  @classmethod
+  def from_string(cls, string_coord):
+    org, name, rev, classifier, ext = string_coord.split(':')
+    return M2Coordinate(org, name, rev or None, classifier or None, ext or None)
 
   def __eq__(self, other):
     return isinstance(other, M2Coordinate) and self._id == other._id

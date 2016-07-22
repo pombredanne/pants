@@ -13,13 +13,16 @@ from pants.backend.jvm.subsystems.shader import Shader
 from pants.backend.jvm.targets.jar_dependency import JarDependency
 from pants.backend.jvm.tasks.nailgun_task import NailgunTask
 from pants.base.exceptions import TaskError
-from pants.option.custom_types import dict_option, file_option
+from pants.option.custom_types import dict_with_files_option, file_option
 from pants.process.xargs import Xargs
 from pants.util.dirutil import safe_open
 
 
 class Checkstyle(NailgunTask):
-  """Check Java code for style violations."""
+  """Check Java code for style violations.
+
+  :API: public
+  """
 
   _CHECKSTYLE_MAIN = 'com.puppycrawl.tools.checkstyle.Main'
 
@@ -30,16 +33,17 @@ class Checkstyle(NailgunTask):
   @classmethod
   def register_options(cls, register):
     super(Checkstyle, cls).register_options(register)
-    register('--skip', action='store_true', fingerprint=True,
+    register('--skip', type=bool, fingerprint=True,
              help='Skip checkstyle.')
     register('--configuration', advanced=True, type=file_option, fingerprint=True,
              help='Path to the checkstyle configuration file.')
-    register('--properties', advanced=True, type=dict_option, default={}, fingerprint=True,
+    register('--properties', advanced=True, type=dict_with_files_option, default={},
+             fingerprint=True,
              help='Dictionary of property mappings to use for checkstyle.properties.')
-    register('--confs', advanced=True, default=['default'],
+    register('--confs', advanced=True, type=list, default=['default'],
              help='One or more ivy configurations to resolve for this target.')
-    register('--jvm-options', advanced=True, action='append', metavar='<option>...',
-             help='Run checkstyle with these extra jvm options.')
+    register('--include-user-classpath', type=bool, fingerprint=True,
+             help='Add the user classpath to the checkstyle classpath')
     cls.register_jvm_tool(register,
                           'checkstyle',
                           classpath=[
@@ -68,7 +72,8 @@ class Checkstyle(NailgunTask):
   @classmethod
   def prepare(cls, options, round_manager):
     super(Checkstyle, cls).prepare(options, round_manager)
-    round_manager.require_data('runtime_classpath')
+    if options.include_user_classpath:
+      round_manager.require_data('runtime_classpath')
 
   def _is_checked(self, target):
     return target.has_sources(self._JAVA_SOURCE_EXTENSION) and not target.is_synthetic
@@ -98,12 +103,13 @@ class Checkstyle(NailgunTask):
     return sources
 
   def checkstyle(self, targets, sources):
-    runtime_classpaths = self.context.products.get_data('runtime_classpath')
     union_classpath = OrderedSet(self.tool_classpath('checkstyle'))
-    for target in targets:
-      runtime_classpath = runtime_classpaths.get_for_targets(target.closure(bfs=True))
-      union_classpath.update(jar for conf, jar in runtime_classpath
-                             if conf in self.get_options().confs)
+    if self.get_options().include_user_classpath:
+      runtime_classpaths = self.context.products.get_data('runtime_classpath')
+      for target in targets:
+        runtime_classpath = runtime_classpaths.get_for_targets(target.closure(bfs=True))
+        union_classpath.update(jar for conf, jar in runtime_classpath
+                               if conf in self.get_options().confs)
 
     args = [
       '-c', self.get_options().configuration,

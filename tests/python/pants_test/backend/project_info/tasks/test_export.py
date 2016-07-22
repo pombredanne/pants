@@ -7,9 +7,10 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 
 import json
 import os
+import textwrap
+from contextlib import contextmanager
 from textwrap import dedent
 
-from pants.backend.core.register import build_file_aliases as register_core
 from pants.backend.jvm.register import build_file_aliases as register_jvm
 from pants.backend.jvm.subsystems.scala_platform import ScalaPlatform
 from pants.backend.jvm.targets.jar_dependency import JarDependency
@@ -24,14 +25,19 @@ from pants.backend.jvm.tasks.classpath_products import ClasspathProducts
 from pants.backend.project_info.tasks.export import Export
 from pants.backend.python.register import build_file_aliases as register_python
 from pants.base.exceptions import TaskError
+from pants.build_graph.register import build_file_aliases as register_core
 from pants.build_graph.resources import Resources
 from pants.build_graph.target import Target
+from pants.java.distribution.distribution import DistributionLocator
+from pants.util.contextutil import temporary_dir
+from pants.util.dirutil import chmod_plus_x, safe_open
+from pants.util.osutil import get_os_name, normalize_os_name
+from pants_test.backend.python.tasks.interpreter_cache_test_mixin import InterpreterCacheTestMixin
 from pants_test.subsystem.subsystem_util import subsystem_instance
 from pants_test.tasks.task_test_base import ConsoleTaskTestBase
 
 
-class ExportTest(ConsoleTaskTestBase):
-
+class ExportTest(InterpreterCacheTestMixin, ConsoleTaskTestBase):
   @classmethod
   def task_type(cls):
     return Export
@@ -49,7 +55,8 @@ class ExportTest(ConsoleTaskTestBase):
                                  'java6': {'source': '1.6', 'target': '1.6'}
                                })
 
-    with subsystem_instance(ScalaPlatform):
+    scala_options = {'scala-platform': {'version': 'custom'}}
+    with subsystem_instance(ScalaPlatform, **scala_options):
       self.make_target(':scala-library',
                        JarLibrary,
                        jars=[JarDependency('org.scala-lang', 'scala-library', '2.10.5')])
@@ -162,9 +169,14 @@ class ExportTest(ConsoleTaskTestBase):
         python_library(name="exclude", sources=globs("*.py", exclude=[['foo.py']]))
       '''.strip())
 
+      self.add_to_build_file('src/BUILD', '''
+        target(name="alias")
+      '''.strip())
+
   def execute_export(self, *specs):
     context = self.context(target_roots=[self.target(spec) for spec in specs])
-    context.products.safe_create_data('compile_classpath', init_func=ClasspathProducts.init_func(self.pants_workdir))
+    context.products.safe_create_data('compile_classpath',
+                                      init_func=ClasspathProducts.init_func(self.pants_workdir))
     task = self.create_task(context)
     return list(task.console_output(list(task.context.targets()),
                                     context.products.get_data('compile_classpath')))
@@ -190,13 +202,23 @@ class ExportTest(ConsoleTaskTestBase):
       result['targets']['project_info:globular']['globs']
     )
 
+  def test_source_globs_alias(self):
+    self.set_options(globs=True)
+    result = self.execute_export_json('src:alias')
+
+    self.assertEqual(
+        {'globs': []},
+      result['targets']['src:alias']['globs']
+    )
+
   def test_without_dependencies(self):
     result = self.execute_export_json('project_info:first')
     self.assertEqual({}, result['libraries'])
 
   def test_version(self):
     result = self.execute_export_json('project_info:first')
-    self.assertEqual('1.0.4', result['version'])
+    # If you have to update this test, make sure export.md is updated with changelog notes
+    self.assertEqual('1.0.9', result['version'])
 
   def test_sources(self):
     self.set_options(sources=True)
@@ -246,15 +268,20 @@ class ExportTest(ConsoleTaskTestBase):
       'globs': {'globs': ['project_info/this/is/a/source/Foo.scala',
                           'project_info/this/is/a/source/Bar.scala']},
       'libraries': ['org.apache:apache-jar:12.12.2012', 'org.scala-lang:scala-library:2.10.5'],
+      'id': 'project_info.jvm_target',
       'is_code_gen': False,
       'targets': ['project_info:jar_lib', '//:scala-library'],
+      'is_synthetic': False,
+      'is_target_root': True,
       'roots': [
          {
            'source_root': '{root}/project_info/this/is/a/source'.format(root=self.build_root),
            'package_prefix': 'this.is.a.source'
          },
       ],
+      'scope' : 'default',
       'target_type': 'SOURCE',
+      'transitive' : True,
       'pants_target_type': 'scala_library',
       'platform': 'java6',
     }
@@ -313,10 +340,6 @@ class ExportTest(ConsoleTaskTestBase):
     with self.assertRaises(TaskError):
       self.execute_export('project_info:target_type')
 
-  def test_unrecognized_target_type(self):
-    with self.assertRaises(TaskError):
-      self.execute_export('project_info:unrecognized_target_type')
-
   def test_source_exclude(self):
     self.set_options(globs=True)
     result = self.execute_export_json('src/python/exclude')
@@ -335,7 +358,7 @@ class ExportTest(ConsoleTaskTestBase):
     result = self.execute_export_json('src/python/y')
 
     self.assertEqual(
-      {'globs': ['src/python/y/**/*.py', 'src/python/y/*.py']},
+      {'globs': ['src/python/y/**/*.py']},
       result['targets']['src/python/y:y']['globs']
     )
 
@@ -344,7 +367,7 @@ class ExportTest(ConsoleTaskTestBase):
     result = self.execute_export_json('src/python/y:y2')
 
     self.assertEqual(
-      {'globs': ['src/python/y/subdir/**/*.py', 'src/python/y/subdir/*.py']},
+      {'globs': ['src/python/y/subdir/**/*.py']},
       result['targets']['src/python/y:y2']['globs']
     )
 
@@ -365,3 +388,52 @@ class ExportTest(ConsoleTaskTestBase):
       {'globs': ['src/python/z/**/*.py']},
       result['targets']['src/python/z:z']['globs']
     )
+
+  def test_synthetic_target(self):
+    # Create a BUILD file then add itself as resources
+    self.add_to_build_file('src/python/alpha/BUILD', '''
+        python_library(name="alpha", sources=zglobs("**/*.py"), resources=["BUILD"])
+      '''.strip())
+
+    result = self.execute_export_json('src/python/alpha')
+    # The synthetic resource is synthetic
+    self.assertTrue(result['targets']['src/python/alpha:alpha_synthetic_resources']['is_synthetic'])
+    # But not the origin target
+    self.assertFalse(result['targets']['src/python/alpha:alpha']['is_synthetic'])
+
+  @contextmanager
+  def fake_distribution(self, version):
+    with temporary_dir() as java_home:
+      path = os.path.join(java_home, 'bin/java')
+      with safe_open(path, 'w') as fp:
+        fp.write(textwrap.dedent("""
+          #!/bin/sh
+          echo java.version={version}
+        """.format(version=version)).strip())
+      chmod_plus_x(path)
+      yield java_home
+
+  def test_preferred_jvm_distributions(self):
+    self.set_options_for_scope('jvm-platform',
+                               default_platform='java9999',
+                               platforms={
+                                 'java9999': {'target': '9999'},
+                                 'java10000': {'target': '10000'}
+                               })
+
+    with self.fake_distribution(version='9999') as strict_home:
+      with self.fake_distribution(version='10000') as non_strict_home:
+        self.set_options_for_scope('jvm-distributions',
+                                   paths={
+                                     normalize_os_name(get_os_name()): [
+                                       strict_home,
+                                       non_strict_home
+                                     ]
+                                   })
+        with subsystem_instance(DistributionLocator) as locator:
+          locator._reset()  # Make sure we get a fresh read from the options set just above.
+          self.addCleanup(locator._reset)  # And make sure we we clean up the values we cache.
+
+          export_json = self.execute_export_json()
+          self.assertEqual({'strict': strict_home, 'non_strict': non_strict_home},
+                           export_json['preferred_jvm_distributions']['java9999'])

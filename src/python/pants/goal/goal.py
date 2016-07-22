@@ -5,14 +5,16 @@
 from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
                         unicode_literals, with_statement)
 
-from pants.base.deprecated import deprecated
 from pants.goal.error import GoalError
+from pants.option.optionable import Optionable
 
 
 class Goal(object):
   """Factory for objects representing goals.
 
   Ensures that we have exactly one instance per goal name.
+
+  :API: public
   """
   _goal_by_name = dict()
 
@@ -31,12 +33,17 @@ class Goal(object):
     need not be registered explicitly.  This method is primarily useful for setting a
     description on a generic goal like 'compile' or 'test', that multiple backends will
     register tasks on.
+
+    :API: public
     """
     cls.by_name(name)._description = description
 
   @classmethod
   def by_name(cls, name):
-    """Returns the unique object representing the goal of the specified name."""
+    """Returns the unique object representing the goal of the specified name.
+
+    :API: public
+    """
     if name not in cls._goal_by_name:
       cls._goal_by_name[name] = _Goal(name)
     return cls._goal_by_name[name]
@@ -46,22 +53,33 @@ class Goal(object):
     """Remove all goals and tasks.
 
     This method is EXCLUSIVELY for use in tests and during pantsd startup.
+
+    :API: public
     """
     cls._goal_by_name.clear()
 
   @staticmethod
   def scope(goal_name, task_name):
-    """Returns options scope for specified task in specified goal."""
+    """Returns options scope for specified task in specified goal.
+
+    :API: public
+    """
     return goal_name if goal_name == task_name else '{0}.{1}'.format(goal_name, task_name)
 
   @staticmethod
   def all():
-    """Returns all registered goals, sorted alphabetically by name."""
+    """Returns all registered goals, sorted alphabetically by name.
+
+    :API: public
+    """
     return [pair[1] for pair in sorted(Goal._goal_by_name.items())]
 
   @classmethod
   def subsystems(cls):
-    """Returns all subsystem types used by all tasks, in no particular order."""
+    """Returns all subsystem types used by all tasks, in no particular order.
+
+    :API: public
+    """
     ret = set()
     for goal in cls.all():
       ret.update(goal.subsystems())
@@ -74,6 +92,7 @@ class _Goal(object):
 
     Create goals only through the Goal.by_name() factory.
     """
+    Optionable.validate_scope_name_component(name)
     self.name = name
     self._description = ''
     self.serialize = False
@@ -87,8 +106,11 @@ class _Goal(object):
     # Return the docstring for the Task registered under the same name as this goal, if any.
     # This is a very common case, and therefore a useful idiom.
     namesake_task = self._task_type_by_name.get(self.name)
-    if namesake_task:
-      return namesake_task.__doc__
+    if namesake_task and namesake_task.__doc__:
+      # First line of docstring.
+      # TODO: This is repetitive of Optionable.get_description(). We should probably just
+      # make Goal an Optionable, for uniformity.
+      return namesake_task.__doc__.partition('\n')[0].strip()
     return ''
 
   def register_options(self, options):
@@ -105,11 +127,14 @@ class _Goal(object):
     replace: Removes all existing tasks in this goal and installs this task.
     before: Places the task before the named task in the execution list.
     after: Places the task after the named task in the execution list.
+
+    :API: public
     """
     if [bool(place) for place in [first, replace, before, after]].count(True) > 1:
       raise GoalError('Can only specify one of first, replace, before or after')
 
     task_name = task_registrar.name
+    Optionable.validate_scope_name_component(task_name)
     options_scope = Goal.scope(self.name, task_name)
 
     # Currently we need to support registering the same task type multiple times in different
@@ -151,14 +176,6 @@ class _Goal(object):
 
     return self
 
-  @deprecated('0.0.66', "Single-task goals will take their description from the first sentence "
-                        "of that task's docstring.  Multiple-task goals can register a description "
-                        "explicitly using Goal.register(name, description).")
-  def with_description(self, description):
-    """Add a description to this goal."""
-    self._description = description
-    return self
-
   def uninstall_task(self, name):
     """Removes the named task from this goal.
 
@@ -166,6 +183,8 @@ class _Goal(object):
 
     Note: Does not relax a serialization requirement that originated
     from the uninstalled task's install() call.
+
+    :API: public
     """
     if name in self._task_type_by_name:
       self._task_type_by_name[name].options_scope = None

@@ -21,7 +21,7 @@ from pants.base.build_environment import get_buildroot
 from pants.java.executor import Executor, SubprocessExecutor
 from pants.java.nailgun_client import NailgunClient
 from pants.pantsd.process_manager import ProcessGroup, ProcessManager
-from pants.util.dirutil import safe_open
+from pants.util.dirutil import safe_file_dump, safe_open
 
 
 logger = logging.getLogger(__name__)
@@ -30,15 +30,15 @@ logger = logging.getLogger(__name__)
 class NailgunProcessGroup(ProcessGroup):
   _NAILGUN_KILL_LOCK = threading.Lock()
 
-  def __init__(self):
-    super(NailgunProcessGroup, self).__init__(name='nailgun')
+  def __init__(self, metadata_base_dir=None):
+    super(NailgunProcessGroup, self).__init__(name='nailgun', metadata_base_dir=metadata_base_dir)
     # TODO: this should enumerate the .pids dir first, then fallback to ps enumeration (& warn).
 
   def _iter_nailgun_instances(self, everywhere=False):
     def predicate(proc):
       if proc.name() == NailgunExecutor._PROCESS_NAME:
         if not everywhere:
-          return NailgunExecutor._PANTS_NG_ARG in proc.cmdline()
+          return NailgunExecutor._PANTS_NG_BUILDROOT_ARG in proc.cmdline()
         else:
           return any(arg.startswith(NailgunExecutor._PANTS_NG_ARG_PREFIX) for arg in proc.cmdline())
 
@@ -73,16 +73,19 @@ class NailgunExecutor(Executor, ProcessManager):
   _PANTS_NG_ARG_PREFIX = b'-Dpants.buildroot'
   _PANTS_FINGERPRINT_ARG_PREFIX = b'-Dpants.nailgun.fingerprint'
   _PANTS_OWNER_ARG_PREFIX = b'-Dpants.nailgun.owner'
-  _PANTS_NG_ARG = '='.join((_PANTS_NG_ARG_PREFIX, get_buildroot()))
+  _PANTS_NG_BUILDROOT_ARG = '='.join((_PANTS_NG_ARG_PREFIX, get_buildroot()))
 
   _NAILGUN_SPAWN_LOCK = threading.Lock()
   _SELECT_WAIT = 1
   _PROCESS_NAME = b'java'
 
   def __init__(self, identity, workdir, nailgun_classpath, distribution, ins=None,
-               connect_timeout=10, connect_attempts=5):
+               connect_timeout=10, connect_attempts=5, metadata_base_dir=None):
     Executor.__init__(self, distribution=distribution)
-    ProcessManager.__init__(self, name=identity, process_name=self._PROCESS_NAME)
+    ProcessManager.__init__(self,
+                            name=identity,
+                            process_name=self._PROCESS_NAME,
+                            metadata_base_dir=metadata_base_dir)
 
     if not isinstance(workdir, string_types):
       raise ValueError('Workdir must be a path string, not: {workdir}'.format(workdir=workdir))
@@ -228,10 +231,10 @@ class NailgunExecutor(Executor, ProcessManager):
   def _spawn_nailgun_server(self, fingerprint, jvm_options, classpath, stdout, stderr):
     """Synchronously spawn a new nailgun server."""
     # Truncate the nailguns stdout & stderr.
-    self._write_file(self._ng_stdout, '')
-    self._write_file(self._ng_stderr, '')
+    safe_file_dump(self._ng_stdout, '')
+    safe_file_dump(self._ng_stderr, '')
 
-    jvm_options = jvm_options + [self._PANTS_NG_ARG,
+    jvm_options = jvm_options + [self._PANTS_NG_BUILDROOT_ARG,
                                  self._create_owner_arg(self._workdir),
                                  self._create_fingerprint_arg(fingerprint)]
 
@@ -257,6 +260,15 @@ class NailgunExecutor(Executor, ProcessManager):
     self.ensure_connectable(client)
 
     return client
+
+  def _check_process_buildroot(self, process):
+    """Matches only processes started from the current buildroot."""
+    return self._PANTS_NG_BUILDROOT_ARG in process.cmdline()
+
+  def is_alive(self):
+    """A ProcessManager.is_alive() override that ensures buildroot flags are present in the process
+    command line arguments."""
+    return super(NailgunExecutor, self).is_alive(self._check_process_buildroot)
 
   def post_fork_child(self, fingerprint, jvm_options, classpath, stdout, stderr):
     """Post-fork() child callback for ProcessManager.daemon_spawn()."""

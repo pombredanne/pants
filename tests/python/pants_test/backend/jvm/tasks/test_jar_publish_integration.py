@@ -27,7 +27,10 @@ def shared_artifacts(version, extra_jar=None):
 # TODO: Right now some options are set via config and some via cmd-line flags. Normalize this?
 def publish_extra_config(unique_config):
   return {
-    'DEFAULT': {
+    'GLOBAL': {
+      # Turn off --verify-config as some scopes in pants.ini will not be
+      # recognized due to the select few backend packages.
+      'verify_config': False,
       'pythonpath': [
         'examples/src/python',
         'pants-plugins/src/python',
@@ -35,7 +38,6 @@ def publish_extra_config(unique_config):
       'backend_packages': [
         'example.pants_publish_plugin',
         'internal_backend.repositories',
-        'pants.backend.android',  # There are android target source roots defined in examples/BUILD
       ],
     },
     'publish.jar': {
@@ -239,9 +241,8 @@ class JarPublishIntegrationTest(PantsRunIntegrationTest):
       if extra_options:
         options.extend(extra_options)
 
-      yes = 'y' * expected_primary_artifact_count
       pants_run = self.run_pants(['publish.jar'] + options + [target], config=extra_config,
-                                 stdin_data=yes, extra_env=extra_env)
+                                 extra_env=extra_env)
       if success_expected:
         self.assert_success(pants_run, "'pants goal publish' expected success, but failed instead.")
       else:
