@@ -24,7 +24,10 @@ python_library(
   dependencies=[
     '3rdparty/python:six',
     ':objects',
+    'src/python/pants/build_graph',
+    'src/python/pants/util:memo',
     'src/python/pants/util:meta',
+    'src/python/pants/util:objects',
   ]
 )
 
@@ -38,12 +41,10 @@ python_library(
 )
 
 python_library(
-  name='engine',
   sources=['engine.py'],
   dependencies=[
     '3rdparty/python/twitter/commons:twitter.common.collections',
     ':objects',
-    ':processing',
     ':storage',
     'src/python/pants/base:exceptions',
     'src/python/pants/util:meta',
@@ -55,6 +56,8 @@ python_library(
   sources=['fs.py'],
   dependencies=[
     '3rdparty/python/twitter/commons:twitter.common.collections',
+    ':rules',
+    ':selectors',
     'src/python/pants/base:project_tree',
     'src/python/pants/source',
     'src/python/pants/util:meta',
@@ -63,8 +66,8 @@ python_library(
 )
 
 python_library(
-  name='graph',
-  sources=['graph.py'],
+  name='build_files',
+  sources=['build_files.py'],
   dependencies=[
     '3rdparty/python:six',
     ':addressable',
@@ -72,6 +75,7 @@ python_library(
     ':mapper',
     ':objects',
     ':selectors',
+    ':struct',
     'src/python/pants/base:project_tree',
     'src/python/pants/build_graph',
   ]
@@ -81,6 +85,7 @@ python_library(
   name='mapper',
   sources=['mapper.py'],
   dependencies=[
+    '3rdparty/python:pathspec',
     ':objects',
     ':parser',
     'src/python/pants/build_graph',
@@ -129,6 +134,7 @@ python_library(
   sources=['parser.py'],
   dependencies=[
     '3rdparty/python:six',
+    ':addressable',
     ':objects',
     'src/python/pants/build_graph',
     'src/python/pants/util:memo',
@@ -136,10 +142,15 @@ python_library(
 )
 
 python_library(
-  name='processing',
-  sources=['processing.py'],
+  name='rules',
+  sources=['rules.py'],
   dependencies=[
-    '3rdparty/python:futures',
+    '3rdparty/python/twitter/commons:twitter.common.collections',
+    ':addressable',
+    ':selectors',
+    'src/python/pants/base:specs',
+    'src/python/pants/build_graph',
+    'src/python/pants/util:objects',
   ]
 )
 
@@ -147,7 +158,8 @@ python_library(
   name='selectors',
   sources=['selectors.py'],
   dependencies=[
-    'src/python/pants/util:memo',
+    '3rdparty/python:six',
+    ':addressable',
     'src/python/pants/util:meta',
     'src/python/pants/util:objects',
   ]
@@ -162,8 +174,10 @@ python_library(
     ':fs',
     ':isolated_process',
     ':nodes',
+    ':rules',
     'src/python/pants/base:specs',
     'src/python/pants/build_graph',
+    'src/python/pants/engine/subsystem:native',
     'src/python/pants/util:objects',
   ]
 )
@@ -172,9 +186,9 @@ python_library(
   name='storage',
   sources=['storage.py'],
   dependencies=[
+    ':nodes',
     ':objects',
-    ':scheduler',
-    '3rdparty/python:lmdb',
-    'src/python/pants/util:dirutil'
+    'src/python/pants/util:dirutil',
+    'src/python/pants/util:meta',
   ]
 )

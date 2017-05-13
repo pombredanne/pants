@@ -6,39 +6,27 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
                         unicode_literals, with_statement)
 
 import os
+import re
 import unittest
 from contextlib import contextmanager
 from textwrap import dedent
 
-import pytest
-
 from pants.base.specs import DescendantAddresses, SiblingAddresses, SingleAddress
 from pants.build_graph.address import Address
-from pants.engine.addressable import SubclassesOf, addressable_list
+from pants.engine.addressable import BuildFileAddresses, Collection
+from pants.engine.build_files import UnhydratedStruct, create_graph_rules
 from pants.engine.engine import LocalSerialEngine
-from pants.engine.graph import UnhydratedStruct, create_graph_tasks
 from pants.engine.mapper import (AddressFamily, AddressMap, AddressMapper, DifferingFamiliesError,
-                                 DuplicateNameError, ResolveError, UnaddressableObjectError)
+                                 DuplicateNameError, UnaddressableObjectError)
 from pants.engine.nodes import Throw
 from pants.engine.parser import SymbolTable
-from pants.engine.struct import HasProducts, Struct
+from pants.engine.rules import TaskRule
+from pants.engine.selectors import Select, SelectDependencies
+from pants.engine.struct import Struct
 from pants.util.dirutil import safe_open
 from pants_test.engine.examples.parsers import JsonParser
 from pants_test.engine.scheduler_test_base import SchedulerTestBase
-
-
-class Target(Struct, HasProducts):
-  def __init__(self, name=None, configurations=None, **kwargs):
-    super(Target, self).__init__(name=name, **kwargs)
-    self.configurations = configurations
-
-  @property
-  def products(self):
-    return self.configurations
-
-  @addressable_list(SubclassesOf(Struct))
-  def configurations(self):
-    pass
+from pants_test.engine.util import Target, TargetTable
 
 
 class Thing(object):
@@ -150,10 +138,7 @@ class AddressFamilyTest(unittest.TestCase):
                                        {'one': Thing(name='one', age=37)})])
 
 
-class TargetTable(SymbolTable):
-  @classmethod
-  def table(cls):
-    return {'struct': Struct, 'target': Target}
+UnhydratedStructs = Collection.of(UnhydratedStruct)
 
 
 class AddressMapperTest(unittest.TestCase, SchedulerTestBase):
@@ -162,8 +147,17 @@ class AddressMapperTest(unittest.TestCase, SchedulerTestBase):
     symbol_table_cls = TargetTable
     address_mapper = AddressMapper(symbol_table_cls=symbol_table_cls,
                                    parser_cls=JsonParser,
-                                   build_pattern='*.BUILD.json')
-    tasks = create_graph_tasks(address_mapper, symbol_table_cls)
+                                   build_patterns=('*.BUILD.json',))
+    tasks = create_graph_rules(address_mapper, symbol_table_cls)
+    # TODO handle updating the rule graph when passed unexpected root selectors.
+    # Adding the following task allows us to get around the fact that SelectDependencies
+    # requests are not currently supported.
+    tasks.append(TaskRule(UnhydratedStructs,
+                          [SelectDependencies(UnhydratedStruct,
+                                              BuildFileAddresses,
+                                              field_types=(Address,),
+                                              field='addresses')],
+                          UnhydratedStructs))
 
     project_tree = self.mk_fs_tree(os.path.join(os.path.dirname(__file__), 'examples/mapper_test'))
     self.build_root = project_tree.build_root
@@ -176,7 +170,9 @@ class AddressMapperTest(unittest.TestCase, SchedulerTestBase):
                              type_alias='target')
 
   def resolve(self, spec):
-    request = self.scheduler.execution_request([UnhydratedStruct], [spec])
+    # TODO reenable using SelectDependencies
+    select = Select(UnhydratedStructs)
+    request = self.scheduler.selection_request([(select, spec)])
     result = LocalSerialEngine(self.scheduler).execute(request)
     if result.error:
       raise result.error
@@ -184,33 +180,36 @@ class AddressMapperTest(unittest.TestCase, SchedulerTestBase):
     # Expect a single root.
     state, = result.root_products.values()
     if type(state) is Throw:
-      raise state.exc
-    return state.value
+      raise Exception(state.exc)
+    return state.value.dependencies
 
   def resolve_multi(self, spec):
     return {uhs.address: uhs.struct for uhs in self.resolve(spec)}
 
   def test_no_address_no_family(self):
-    spec = SingleAddress('a/c', None)
-    # Should fail: does not exist.
-    with self.assertRaises(ResolveError):
+    spec = SingleAddress('a/c', 'c')
+
+    # Does not exist.
+    with self.assertRaises(Exception):
       self.resolve(spec)
 
-    # Exists on disk, but not yet in memory.
-    build_file = os.path.join(self.build_root, 'a/c/c.BUILD.json')
+    build_file = os.path.join(self.build_root, 'a/c', 'c.BUILD.json')
     with safe_open(build_file, 'w') as fp:
       fp.write('{"type_alias": "struct", "name": "c"}')
-    with self.assertRaises(ResolveError):
+
+    # Exists on disk, but not yet in memory.
+    with self.assertRaises(Exception):
       self.resolve(spec)
 
+    self.scheduler.invalidate_files(['a/c'])
+
     # Success.
-    self.scheduler.product_graph.invalidate()
     resolved = self.resolve(spec)
     self.assertEqual(1, len(resolved))
-    self.assertEqual(Struct(name='c', type_alias='struct'), resolved[0].struct)
+    self.assertEqual([Struct(name='c', type_alias='struct')], [r.struct for r in resolved])
 
   def test_resolve(self):
-    resolved = self.resolve(SingleAddress('a/b', None))
+    resolved = self.resolve(SingleAddress('a/b', 'b'))
     self.assertEqual(1, len(resolved))
     self.assertEqual(self.a_b, resolved[0].address)
 
@@ -235,9 +234,3 @@ class AddressMapperTest(unittest.TestCase, SchedulerTestBase):
                       self.addr('a/d/e:e'): Target(name='e', type_alias='target'),
                       self.addr('a/d/e:e-prime'): Struct(name='e-prime', type_alias='struct')},
                      self.resolve_multi(DescendantAddresses('a/d')))
-
-  @pytest.mark.xfail(reason='''Excludes are not implemented: expects excludes=['a/b', 'a/d/e'])''')
-  def test_walk_descendants_path_excludes(self):
-    self.assertEqual({self.addr('//:root'): Struct(name='root'),
-                      self.addr('a/d:d'): Target(name='d')},
-                     self.resolve_multi(DescendantAddresses('')))

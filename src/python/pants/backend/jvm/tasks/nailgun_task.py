@@ -7,11 +7,11 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 
 import os
 
-from pants.backend.jvm.targets.jar_dependency import JarDependency
 from pants.backend.jvm.tasks.jvm_tool_task_mixin import JvmToolTaskMixin
 from pants.base.exceptions import TaskError
 from pants.java import util
 from pants.java.executor import SubprocessExecutor
+from pants.java.jar.jar_dependency import JarDependency
 from pants.java.nailgun_executor import NailgunExecutor, NailgunProcessGroup
 from pants.pantsd.subsystem.subprocess import Subprocess
 from pants.task.task import Task, TaskBase
@@ -38,8 +38,8 @@ class NailgunTaskBase(JvmToolTaskMixin, TaskBase):
                           ])
 
   @classmethod
-  def global_subsystems(cls):
-    return super(NailgunTaskBase, cls).global_subsystems() + (Subprocess.Factory,)
+  def subsystem_dependencies(cls):
+    return super(NailgunTaskBase, cls).subsystem_dependencies() + (Subprocess.Factory,)
 
   def __init__(self, *args, **kwargs):
     """
@@ -63,11 +63,11 @@ class NailgunTaskBase(JvmToolTaskMixin, TaskBase):
       return NailgunExecutor(self._identity,
                              self._executor_workdir,
                              classpath,
-                             self._dist,
+                             self.dist,
                              connect_timeout=self.get_options().nailgun_timeout_seconds,
                              connect_attempts=self.get_options().nailgun_connect_attempts)
     else:
-      return SubprocessExecutor(self._dist)
+      return SubprocessExecutor(self.dist)
 
   def runjava(self, classpath, main, jvm_options=None, args=None, workunit_name=None,
               workunit_labels=None, workunit_log_config=None):

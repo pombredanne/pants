@@ -86,13 +86,6 @@ class BundleProps(namedtuple('_BundleProps', ['rel_path', 'mapper', 'fileset']))
     # Leave out fileset from hash calculation since it may not be hashable.
     return hash((self.rel_path, self.mapper))
 
-  @classmethod
-  def create_bundle_props(cls, file_set):
-    if not isinstance(file_set, FilesetWithSpec):
-      raise TypeError('The file_set must be a FilesetWithSpec, given {}.'.format(file_set))
-    mapper = RelativeToMapper(os.path.join(get_buildroot(), file_set.rel_root))
-    return cls(file_set.rel_root, mapper, file_set.files)
-
 
 class Bundle(object):
   """A set of files to include in an application bundle.
@@ -121,7 +114,7 @@ class Bundle(object):
   """
 
   def __init__(self, parse_context):
-    self._rel_path = parse_context.rel_path
+    self._parse_context = parse_context
 
   def __call__(self, rel_path=None, mapper=None, relative_to=None, fileset=None):
     """
@@ -135,14 +128,15 @@ class Bundle(object):
       filenames, or a Fileset object (e.g. globs()).
       E.g., ``relative_to='common'`` removes that prefix from all files in the application bundle.
     """
+
     if fileset is None:
       raise ValueError("In {}:\n  Bare bundle() declarations without a `fileset=` parameter "
-                       "are no longer supported.".format(self._rel_path))
+                       "are no longer supported.".format(self._parse_context.rel_path))
 
     if mapper and relative_to:
       raise ValueError("Must specify exactly one of 'mapper' or 'relative_to'")
 
-    if rel_path and isinstance(fileset, FilesetWithSpec):
+    if rel_path and isinstance(fileset, FilesetWithSpec) and fileset.rel_root != rel_path:
       raise ValueError("Must not use a glob for 'fileset' with 'rel_path'."
                        " Globs are eagerly evaluated and ignore 'rel_path'.")
 
@@ -154,7 +148,7 @@ class Bundle(object):
     else:
       fileset = assert_list(fileset, key_arg='fileset')
 
-    real_rel_path = rel_path or self._rel_path
+    real_rel_path = rel_path or self._parse_context.rel_path
 
     if relative_to:
       base = os.path.join(get_buildroot(), real_rel_path, relative_to)
@@ -163,6 +157,13 @@ class Bundle(object):
       mapper = mapper or RelativeToMapper(os.path.join(get_buildroot(), real_rel_path))
 
     return BundleProps(real_rel_path, mapper, fileset)
+
+  def create_bundle_props(self, bundle):
+    rel_path = getattr(bundle, 'rel_path', None)
+    mapper = getattr(bundle, 'mapper', None)
+    relative_to = getattr(bundle, 'relative_to', None)
+    fileset = getattr(bundle, 'fileset', None)
+    return self(rel_path, mapper, relative_to, fileset)
 
 
 class BundleField(tuple, PayloadField):
@@ -262,12 +263,15 @@ class JvmApp(Target):
       globs += super_globs['globs']
     return {'globs': globs}
 
-  @property
-  def traversable_dependency_specs(self):
-    for spec in super(JvmApp, self).traversable_dependency_specs:
+  @classmethod
+  def compute_dependency_specs(cls, kwargs=None, payload=None):
+    for spec in super(JvmApp, cls).compute_dependency_specs(kwargs, payload):
       yield spec
-    if self.payload.binary:
-      yield self.payload.binary
+
+    target_representation = kwargs or payload.as_dict()
+    binary = target_representation.get('binary')
+    if binary:
+      yield binary
 
   @property
   def basename(self):

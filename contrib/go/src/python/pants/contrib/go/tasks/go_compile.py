@@ -25,12 +25,12 @@ class GoCompile(GoWorkspaceTask):
   @classmethod
   def register_options(cls, register):
     super(GoCompile, cls).register_options(register)
-    register('--build-flags', default='',
+    register('--build-flags', default='', fingerprint=True,
              help='Build flags to pass to Go compiler.')
 
   @classmethod
   def product_types(cls):
-    return ['exec_binary']
+    return ['exec_binary', 'deployable_archives']
 
   def execute(self):
     self.context.products.safe_create_data('exec_binary', lambda: {})
@@ -39,6 +39,8 @@ class GoCompile(GoWorkspaceTask):
                           topological_order=True) as invalidation_check:
       # Maps each local/remote library target to its compiled binary.
       lib_binary_map = {}
+      go_exec_binary = self.context.products.get_data('exec_binary')
+      go_deployable_archive = self.context.products.get('deployable_archives')
       for vt in invalidation_check.all_vts:
         gopath = self.get_gopath(vt.target)
         if not isinstance(vt.target, GoTarget):
@@ -49,16 +51,19 @@ class GoCompile(GoWorkspaceTask):
           self._go_install(vt.target, gopath)
         if self.is_binary(vt.target):
           binary_path = os.path.join(gopath, 'bin', os.path.basename(vt.target.address.spec_path))
-          self.context.products.get_data('exec_binary')[vt.target] = binary_path
+          go_exec_binary[vt.target] = binary_path
+          go_deployable_archive.add(vt.target, os.path.dirname(binary_path)).append(os.path.basename(binary_path))
         else:
           lib_binary_map[vt.target] = os.path.join(gopath, 'pkg', self.goos_goarch,
                                                    vt.target.import_path + '.a')
 
   def _go_install(self, target, gopath):
     args = self.get_options().build_flags.split() + [target.import_path]
-    result, go_cmd = self.go_dist.execute_go_cmd('install', gopath=gopath, args=args,
-                                                 workunit_factory=self.context.new_workunit,
-                                                 workunit_labels=[WorkUnitLabel.COMPILER])
+    result, go_cmd = self.go_dist.execute_go_cmd(
+      'install', gopath=gopath, args=args,
+      workunit_factory=self.context.new_workunit,
+      workunit_name='install {}'.format(target.address.spec),
+      workunit_labels=[WorkUnitLabel.COMPILER])
     if result != 0:
       raise TaskError('{} failed with exit code {}'.format(go_cmd, result))
 

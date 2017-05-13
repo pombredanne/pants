@@ -5,6 +5,7 @@
 from __future__ import (absolute_import, division, generators, nested_scopes, print_function,
                         unicode_literals, with_statement)
 
+import ast
 import json
 import multiprocessing
 import os
@@ -86,8 +87,8 @@ class RunTracker(Subsystem):
     # run_id is safe for use in paths.
     millis = int((run_timestamp * 1000) % 1000)
     run_id = 'pants_run_{}_{}_{}'.format(
-               time.strftime('%Y_%m_%d_%H_%M_%S', time.localtime(run_timestamp)), millis,
-               uuid.uuid4().hex)
+      time.strftime('%Y_%m_%d_%H_%M_%S', time.localtime(run_timestamp)), millis,
+      uuid.uuid4().hex)
 
     info_dir = os.path.join(self.get_options().pants_workdir, self.options_scope)
     self.run_info_dir = os.path.join(info_dir, run_id)
@@ -143,6 +144,20 @@ class RunTracker(Subsystem):
     SubprocPool.foreground()
 
     self._aborted = False
+
+    # Data will be organized first by target and then scope.
+    # Eg:
+    # {
+    #   'target/address:name': {
+    #     'running_scope': {
+    #       'run_duration': 356.09
+    #     },
+    #     'GLOBAL': {
+    #       'target_type': 'pants.test'
+    #     }
+    #   }
+    # }
+    self._target_to_data = {}
 
   def register_thread(self, parent_workunit):
     """Register the parent workunit for all work in the calling thread.
@@ -285,8 +300,13 @@ class RunTracker(Subsystem):
 
   def store_stats(self):
     """Store stats about this run in local and optionally remote stats dbs."""
+    run_information = self.run_info.get_as_dict()
+    target_data = run_information.get('target_data', None)
+    if target_data:
+      run_information['target_data'] = ast.literal_eval(target_data)
+
     stats = {
-      'run_info': self.run_info.get_as_dict(),
+      'run_info': run_information,
       'cumulative_timings': self.cumulative_timings.get_all(),
       'self_timings': self.self_timings.get_all(),
       'artifact_cache_stats': self.artifact_cache_stats.get_all(),
@@ -304,7 +324,12 @@ class RunTracker(Subsystem):
     # Upload to remote stats db.
     stats_url = self.get_options().stats_upload_url
     if stats_url:
-      self.post_stats(stats_url, stats, timeout=self.get_options().stats_upload_timeout)
+      pid = os.fork()
+      if pid == 0:
+        try:
+          self.post_stats(stats_url, stats, timeout=self.get_options().stats_upload_timeout)
+        finally:
+          os._exit(0)
 
     # Write stats to local json file.
     stats_json_file_name = self.get_options().stats_local_json_file
@@ -317,6 +342,8 @@ class RunTracker(Subsystem):
     """This pants run is over, so stop tracking it.
 
     Note: If end() has been called once, subsequent calls are no-ops.
+
+    :return: 0 for success, 1 for failure.
     """
     if self._background_worker_pool:
       if self._aborted:
@@ -346,8 +373,13 @@ class RunTracker(Subsystem):
       # If the goal is clean-all then the run info dir no longer exists, so ignore that error.
       self.run_info.add_info('outcome', outcome_str, ignore_errors=True)
 
+    if self._target_to_data:
+      self.run_info.add_info('target_data', self._target_to_data)
+
     self.report.close()
     self.store_stats()
+
+    return 1 if outcome in [WorkUnit.FAILURE, WorkUnit.ABORTED] else 0
 
   def end_workunit(self, workunit):
     self.report.end_workunit(workunit)
@@ -381,3 +413,22 @@ class RunTracker(Subsystem):
     N.B. This exists only for internal use and to afford for fork()-safe operation in pantsd.
     """
     SubprocPool.shutdown(self._aborted)
+
+  def report_target_info(self, scope, target, key, val):
+    """Add target information to run_info under target_data.
+
+    :param string scope: The scope for which we are reporting the information.
+    :param string target: The target for which we want to store information.
+    :param string key: The key that will point to the information being stored.
+    :param dict or string val: The value of the information being stored.
+
+    :API: public
+    """
+    target_data = self._target_to_data.get(target)
+    if target_data is None:
+      self._target_to_data.update({target: {scope: {key: val}}})
+    else:
+      scope_data = target_data.get(scope)
+      if scope_data is None:
+        self._target_to_data[target][scope] = scope_data = {}
+      scope_data.update({key: val})

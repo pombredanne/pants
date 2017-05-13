@@ -7,26 +7,29 @@ from __future__ import (absolute_import, division, generators, nested_scopes, pr
 
 import os
 import unittest
-from contextlib import closing, contextmanager
-
-from concurrent.futures import Future
-from mock import call, create_autospec
+from contextlib import contextmanager
+from textwrap import dedent
 
 from pants.build_graph.address import Address
-from pants.engine.engine import (LocalMultiprocessEngine, LocalSerialEngine, SerializationError,
-                                 ThreadHybridEngine)
-from pants.engine.nodes import FilesystemNode, Return, SelectNode
-from pants.engine.scheduler import Promise
-from pants.engine.storage import Cache, Storage
+from pants.engine.engine import LocalSerialEngine
+from pants.engine.nodes import Return
+from pants.engine.rules import TaskRule
+from pants.engine.scheduler import ExecutionRequest
+from pants.engine.selectors import Select
 from pants_test.engine.examples.planners import Classpath, setup_json_scheduler
+from pants_test.engine.util import (assert_equal_with_printing, create_native_scheduler,
+                                    init_native, remove_locations_from_traceback)
 
 
 class EngineTest(unittest.TestCase):
+
+  _native = init_native()
+
   def setUp(self):
     build_root = os.path.join(os.path.dirname(__file__), 'examples', 'scheduler_inputs')
-    self.scheduler = setup_json_scheduler(build_root)
+    self.scheduler = setup_json_scheduler(build_root, self._native)
 
-    self.java = Address.parse('src/java/codegen/simple')
+    self.java = Address.parse('src/java/simple')
 
   def request(self, goals, *addresses):
     return self.scheduler.build_request(goals=goals,
@@ -34,107 +37,132 @@ class EngineTest(unittest.TestCase):
 
   def assert_engine(self, engine):
     result = engine.execute(self.request(['compile'], self.java))
-    self.assertEqual({SelectNode(self.java, Classpath, None, None):
-                      Return(Classpath(creator='javac'))},
-                     result.root_products)
+    self.scheduler.visualize_graph_to_file('blah/run.0.dot')
+    self.assertEqual([Return(Classpath(creator='javac'))], result.root_products.values())
     self.assertIsNone(result.error)
 
   @contextmanager
-  def multiprocessing_engine(self, pool_size=None):
-    storage = Storage.create(debug=True, in_memory=False)
-    cache = Cache.create(storage=storage)
-    with closing(LocalMultiprocessEngine(self.scheduler, storage, cache,
-                                         pool_size=pool_size, debug=True)) as e:
-      e.start()
-      yield e
-
-  @contextmanager
-  def hybrid_engine(self, pool_size=None):
-    async_nodes = (FilesystemNode,)
-    storage = Storage.create(debug=True, in_memory=False)
-    cache = Cache.create(storage=storage)
-    with closing(ThreadHybridEngine(self.scheduler, storage,
-                                    threaded_node_types=async_nodes, cache=cache,
-                                    pool_size=pool_size, debug=True)) as e:
-      e.start()
-      yield e
+  def serial_engine(self):
+    yield LocalSerialEngine(self.scheduler)
 
   def test_serial_engine_simple(self):
-    with closing(LocalSerialEngine(self.scheduler)) as engine:
+    with self.serial_engine() as engine:
       self.assert_engine(engine)
 
-  @unittest.skip('https://github.com/pantsbuild/pants/issues/3510')
-  def test_multiprocess_engine_multi(self):
-    with self.multiprocessing_engine() as engine:
-      self.assert_engine(engine)
+  def test_product_request_return(self):
+    with self.serial_engine() as engine:
+      count = 0
+      for computed_product in engine.product_request(Classpath, [self.java]):
+        self.assertIsInstance(computed_product, Classpath)
+        count += 1
+      self.assertGreater(count, 0)
 
-  @unittest.skip('https://github.com/pantsbuild/pants/issues/3510')
-  def test_multiprocess_engine_single(self):
-    with self.multiprocessing_engine(pool_size=1) as engine:
-      self.assert_engine(engine)
 
-  @unittest.skip('https://github.com/pantsbuild/pants/issues/3510')
-  def test_multiprocess_unpickleable(self):
-    build_request = self.request(['unpickleable'], self.java)
+class A(object):
+  pass
 
-    with self.multiprocessing_engine() as engine:
-      with self.assertRaises(SerializationError):
-        engine.execute(build_request)
 
-  def test_hybrid_engine_multi(self):
-    with self.hybrid_engine(pool_size=2) as engine:
-      self.assert_engine(engine)
+class B(object):
+  pass
 
-  def test_hybrid_engine_single(self):
-    with self.hybrid_engine(pool_size=2) as engine:
-      self.assert_engine(engine)
 
-  def test_second_pending_future(self):
-    """Validate we handle cache/step correctly
+def fn_raises(x):
+  raise Exception('An exception for {}'.format(type(x).__name__))
 
-    Verify we don't raise a key error when 1 Node finishes cache/step
-    before another Node.  Also verify that success is only called once
-    for each Node.
-    """
-    result_cache = create_autospec(Future)
-    result_cache2 = create_autospec(Future)
-    result_step = create_autospec(Future)
-    result_cache2.result.return_value = (2, 'cache 2')
-    result_cache.result.return_value = (1, 'cache 1')
-    result_step.result.return_value = (1, 'step 1')
-    promise = create_autospec(Promise)
 
-    in_flight = {1: promise, 2: promise}
-    with self.hybrid_engine(pool_size=2) as engine:
-      engine._processed_queue.put(result_cache)
-      engine._processed_queue.put(result_step)
-      engine._processed_queue.put(result_cache2)
-      engine._await_one(in_flight)
-      engine._await_one(in_flight)
+def nested_raise(x):
+  fn_raises(x)
 
-      promise.success.assert_has_calls([call('cache 1'), call('cache 2')])
 
-  @unittest.skip('https://github.com/pantsbuild/pants/issues/3510')
-  def test_rerun_with_cache(self):
-    with self.multiprocessing_engine() as engine:
-      self.assert_engine(engine)
+class SimpleScheduler(object):
+  def __init__(self, native_scheduler):
+    self._scheduler = native_scheduler
 
-      cache_stats = engine.cache_stats()
-      # First run all misses.
-      self.assertTrue(cache_stats.hits == 0)
+  def trace(self):
+    for line in self._scheduler.graph_trace():
+      yield line
 
-      # Save counts for the first run to prepare for another run.
-      max_steps, misses, total = self.scheduler._step_id, cache_stats.misses, cache_stats.total
+  def execution_request(self, products, subjects):
+    return ExecutionRequest(tuple((s, Select(p)) for s in subjects for p in products))
 
-      self.scheduler.product_graph.invalidate()
-      self.assert_engine(engine)
+  def schedule(self, execution_request):
+    self._scheduler.exec_reset()
+    for subject, selector in execution_request.roots:
+      self._scheduler.add_root_selection(subject, selector)
+    self._scheduler.run_and_return_stat()
 
-      # Second run executes same number of steps, and are all cache hits, no more misses.
-      self.assertEquals(max_steps * 2, self.scheduler._step_id)
-      self.assertEquals(total * 2, cache_stats.total)
-      self.assertEquals(misses, cache_stats.misses)
-      self.assertTrue(cache_stats.hits > 0)
+  def root_entries(self, execution_request):
+    return self._scheduler.root_entries(execution_request)
 
-      # Ensure we cache no more than what can be cached.
-      for request, result in engine._cache.items():
-        self.assertTrue(request[0].is_cacheable)
+
+class EngineTraceTest(unittest.TestCase):
+
+  assert_equal_with_printing = assert_equal_with_printing
+
+  def scheduler(self, root_subject_types, rules):
+    return SimpleScheduler(
+      create_native_scheduler(root_subject_types, rules))
+
+  def test_no_include_trace_error_raises_boring_error(self):
+    rules = [
+      TaskRule(A, [Select(B)], nested_raise)
+    ]
+
+    engine = self.create_engine({B},
+                                rules,
+                                include_trace_on_error=False)
+
+    with self.assertRaises(Exception) as cm:
+      list(engine.product_request(A, subjects=[(B())]))
+
+    self.assert_equal_with_printing('An exception for B', str(cm.exception))
+
+  def create_engine(self, root_subject_types, rules, include_trace_on_error):
+    engine = LocalSerialEngine(self.scheduler(root_subject_types, rules), include_trace_on_error=include_trace_on_error)
+    return engine
+
+  def test_no_include_trace_error_multiple_paths_raises_executionerror(self):
+    rules = [
+      TaskRule(A, [Select(B)], nested_raise),
+    ]
+
+    engine = self.create_engine({B},
+                                rules,
+                                include_trace_on_error=False)
+
+    with self.assertRaises(Exception) as cm:
+      list(engine.product_request(A, subjects=[B(), B()]))
+
+    self.assert_equal_with_printing(dedent('''
+      Multiple exceptions encountered:
+        Exception: An exception for B
+        Exception: An exception for B''').lstrip(),
+      str(cm.exception))
+
+
+  def test_include_trace_error_raises_error_with_trace(self):
+    rules = [
+      TaskRule(A, [Select(B)], nested_raise)
+    ]
+
+    engine = self.create_engine({B},
+                                rules,
+                                include_trace_on_error=True)
+    with self.assertRaises(Exception) as cm:
+      list(engine.product_request(A, subjects=[(B())]))
+
+    self.assert_equal_with_printing(dedent('''
+      Received unexpected Throw state(s):
+      Computing Select(<pants_test.engine.test_engine.B object at 0xEEEEEEEEE>, =A)
+        Computing Task(<function nested_raise at 0xEEEEEEEEE>, <pants_test.engine.test_engine.B object at 0xEEEEEEEEE>, =A)
+          Throw(An exception for B)
+            Traceback (most recent call last):
+              File LOCATION-INFO, in extern_invoke_runnable
+                val = runnable(*args)
+              File LOCATION-INFO, in nested_raise
+                fn_raises(x)
+              File LOCATION-INFO, in fn_raises
+                raise Exception('An exception for {}'.format(type(x).__name__))
+            Exception: An exception for B
+      ''').lstrip()+'\n',
+      remove_locations_from_traceback(str(cm.exception)))
